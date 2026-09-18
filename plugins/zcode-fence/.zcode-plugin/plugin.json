@@ -1,6 +1,6 @@
 {
   "name": "zcode-fence",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies.",
   "description_i18n": {
     "en": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies.",
@@ -23,7 +23,7 @@
       "type": "boolean",
       "default": true,
       "title": "项目围栏",
-      "description": "文件写入限制在项目根 + 真实临时目录 + 额外可写根内；越界写入弹确认（ask）。"
+      "description": "文件写入限制在 项目根 + 真实临时目录 + ZCode 项目记忆目录（~/.zcode/cli/memories）+ 额外可写根内；越界写入弹确认（ask）。"
     },
     "custom_rules": {
       "type": "string",

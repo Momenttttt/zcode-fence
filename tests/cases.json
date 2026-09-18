@@ -62,6 +62,8 @@
   { "id": "FB-27", "group": "围栏-Bash", "desc": "ZCODE_PROJECT_DIR 缺失 → 围栏降级放行", "mode": "bash", "command": "echo x > /definitely/outside/f", "expect": "silent", "noProject": true },
   { "id": "FB-28", "group": "围栏-Bash", "desc": "ZCODE_PROJECT_DIR 缺失 → 危险门照常工作", "mode": "bash", "command": "rm -rf /", "expect": "ask", "noProject": true },
   { "id": "FB-29", "group": "围栏-Bash", "desc": "额外可写根放行", "mode": "bash", "command": "echo x > {EXTRA}/ok.txt", "expect": "silent", "config": "extra-roots" },
+  { "id": "FB-31", "group": "围栏-Bash", "desc": "重定向写 ZCode 项目记忆目录 → 放行（默认白名单，记忆功能高频写入）", "mode": "bash", "command": "echo x > {MEM}/projects/demo/memory/note.md", "expect": "silent" },
+  { "id": "FB-32", "group": "围栏-Bash", "desc": "rm -rf ~/.zcode 仍 ask（白名单仅限记忆子树，不含整个 .zcode）", "mode": "bash", "command": "rm -rf ~/.zcode", "expect": "ask" },
 
   { "id": "FF-01", "group": "围栏-文件工具", "desc": "项目内写 → 沉默（交还宿主按其模式处理）", "mode": "file", "tool": "Write", "file_path": "{PROJECT}/src/main.ts", "expect": "silent" },
   { "id": "FF-02", "group": "围栏-文件工具", "desc": "写桌面 → ask", "mode": "file", "tool": "Write", "file_path": "C:/Users/alice/Desktop/a.txt", "expect": "ask" },
@@ -71,6 +73,7 @@
   { "id": "FF-06", "group": "围栏-文件工具", "desc": "中文+空格路径（项目内）放行", "mode": "file", "tool": "Write", "file_path": "{PROJECT}/新建 文件夹/文件.txt", "expect": "silent" },
   { "id": "FF-07", "group": "围栏-文件工具", "desc": "emoji 路径（项目内）放行", "mode": "file", "tool": "Write", "file_path": "{PROJECT}/🎉-中文.md", "expect": "silent" },
   { "id": "FF-08", "group": "围栏-文件工具", "desc": "MSYS 形态项目内路径（Windows 主机）放行", "mode": "file", "tool": "Write", "file_path": "{PROJECT_MSYS}/src/a.ts", "expect": "silent", "platforms": ["win32"] },
+  { "id": "FF-09", "group": "围栏-文件工具", "desc": "写 ZCode 项目记忆目录 → 放行（默认白名单）", "mode": "file", "tool": "Write", "file_path": "{MEM}/projects/demo/memory/note.md", "expect": "silent" },
 
   { "id": "RB-01", "group": "健壮性", "desc": "stdin 非法 JSON → exit 0 无输出（fail-open）+ 日志留痕", "mode": "stdin-raw", "stdin": "not-json{{", "expect": "silent" },
   { "id": "RB-02", "group": "健壮性", "desc": "空命令不崩溃", "mode": "bash", "command": "", "expect": "silent" },

@@ -741,13 +741,16 @@ function buildContext(env) {
   };
 
   if (projectDir) {
-    // 可写根 = 项目根 + 当前平台真实临时目录 + 用户配置的额外可写根
+    // 可写根 = 项目根 + 当前平台真实临时目录 + ZCode 项目记忆目录 + 用户配置的额外可写根
     const roots = [projectDir];
     const temps = platform === 'win32'
       ? [env.TEMP, env.TMP, os.tmpdir()]     // Windows 读 TEMP/TMP（真实临时目录）
       : [env.TMPDIR, '/tmp', os.tmpdir()];   // Unix 用 TMPDIR，/tmp 保留
+    // ZCode 项目记忆目录（~/.zcode/cli/memories）：宿主记忆功能高频写入，默认放行，
+    // 避免完全访问模式下反复弹确认。用正斜杠 join，兼容 HOME 为 MSYS 风格（/c/Users/x）的环境。
+    const memRoot = [homeOf(env), '.zcode', 'cli', 'memories'].join('/');
     const extras = splitList(ctx.cfg.extra_writable_roots);
-    for (const t of temps.concat(extras)) {
+    for (const t of temps.concat([memRoot], extras)) {
       if (!t) continue;
       const i = normalizePath(t, npFile);
       if (i.kind !== 'drive' && i.kind !== 'unix' && i.kind !== 'unc') continue;

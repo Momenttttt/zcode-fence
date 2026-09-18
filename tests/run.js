@@ -61,6 +61,7 @@ function render(s, env) {
     .replace(/\{PROJECT\}/g, PROJECT)
     .replace(/\{PROJECT_MSYS\}/g, msysStyle(PROJECT))
     .replace(/\{EXTRA\}/g, EXTRA)
+    .replace(/\{MEM\}/g, [process.env.HOME || process.env.USERPROFILE, '.zcode', 'cli', 'memories'].join('/'))
     .replace(/\{TEMP\}/g, process.platform === 'win32' ? process.env.TEMP : '/tmp')
     .replace(/\{LONG\}/g, 'a'.repeat(10000));
 }

@@ -199,6 +199,11 @@ t('项目内写 → silent', () => {
   const r = guard.judgePayload({ tool_name: 'Write', tool_input: { file_path: path.join(projDir, 'src', 'a.ts') } }, smokeEnv);
   assert.strictEqual(r.reasons.length, 0);
 });
+t('写 ZCode 项目记忆目录 → silent（默认白名单）', () => {
+  const mem = [smokeEnv.HOME || smokeEnv.USERPROFILE, '.zcode', 'cli', 'memories', 'projects', 'demo', 'memory', 'note.md'].join('/');
+  const r = guard.judgePayload({ tool_name: 'Write', tool_input: { file_path: mem } }, smokeEnv);
+  assert.strictEqual(r.reasons.length, 0);
+});
 
 console.log('');
 console.log('单元测试：' + passed + ' 通过，' + failed + ' 失败');
