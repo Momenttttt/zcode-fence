@@ -805,14 +805,18 @@ function snippet(s) {
   return s.length > 300 ? s.slice(0, 300) + '…' : s;
 }
 
+// 决策日志目录优先级：ZCODE_FENCE_DATA_DIR（测试注入）> ZCODE_PLUGIN_DATA（宿主注入，
+// 指向 <id>@<市场名> 的权威目录）> 扫描 data 目录（@市场 目录优先）> 裸 <id> 兜底。
 function dataDir(env) {
   if (env.ZCODE_FENCE_DATA_DIR) return env.ZCODE_FENCE_DATA_DIR;
   const base = path.join(homeOf(env), '.zcode', 'cli', 'plugins', 'data');
   if (env.ZCODE_PLUGIN_DATA) return env.ZCODE_PLUGIN_DATA;
   try {
-    const hit = fs.readdirSync(base).find((n) => n === PLUGIN_ID || n.indexOf(PLUGIN_ID + '@') === 0);
-    if (hit) return path.join(base, hit); // 宿主实际目录形如 <插件id>@<市场名>
-  } catch (e) { /* 目录不存在则落回裸 id */ }
+    const withMarket = fs.readdirSync(base)
+      .filter((n) => n.indexOf(PLUGIN_ID + '@') === 0).sort();
+    if (withMarket.length) return path.join(base, withMarket[0]);
+    if (fs.existsSync(path.join(base, PLUGIN_ID))) return path.join(base, PLUGIN_ID);
+  } catch (e) { /* data 目录不存在则落回裸 id */ }
   return path.join(base, PLUGIN_ID);
 }
 
@@ -945,6 +949,7 @@ module.exports = {
   isDangerTarget,
   loadConfig,
   splitList,
+  dataDir,
   buildContext,
   judgeCommand,
   judgeFileTool,

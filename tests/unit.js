@@ -152,6 +152,27 @@ t('坏配置 → 默认值 + 留痕', () => {
 });
 t('清单切分容忍空段', () => assert.deepStrictEqual(guard.splitList('a;; b '), ['a', 'b']));
 
+console.log('== 决策日志目录解析（dataDir 优先级）==');
+const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-fence-home-'));
+const fakeData = path.join(fakeHome, '.zcode', 'cli', 'plugins', 'data');
+fs.mkdirSync(path.join(fakeData, 'zcode-fence'), { recursive: true });                 // 历史残留裸目录
+fs.mkdirSync(path.join(fakeData, 'zcode-fence@zcode-fence-market'), { recursive: true }); // 宿主权威目录
+t('裸名与 @市场 并存时优先 @市场（宿主权威目录）', () =>
+  assert.strictEqual(guard.dataDir({ ZCODE_FENCE_HOME: fakeHome }),
+    path.join(fakeData, 'zcode-fence@zcode-fence-market')));
+t('仅裸名存在时兜底裸名', () => {
+  const h2 = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-fence-home2-'));
+  fs.mkdirSync(path.join(h2, '.zcode', 'cli', 'plugins', 'data', 'zcode-fence'), { recursive: true });
+  assert.strictEqual(guard.dataDir({ ZCODE_FENCE_HOME: h2 }),
+    path.join(h2, '.zcode', 'cli', 'plugins', 'data', 'zcode-fence'));
+});
+t('宿主注入 ZCODE_PLUGIN_DATA 时优先于扫描', () =>
+  assert.strictEqual(guard.dataDir({ ZCODE_FENCE_HOME: fakeHome, ZCODE_PLUGIN_DATA: 'D:/host/dir' }), 'D:/host/dir'));
+t('测试注入 ZCODE_FENCE_DATA_DIR 优先级最高', () =>
+  assert.strictEqual(
+    guard.dataDir({ ZCODE_FENCE_HOME: fakeHome, ZCODE_PLUGIN_DATA: 'D:/host/dir', ZCODE_FENCE_DATA_DIR: 'D:/test/dir' }),
+    'D:/test/dir'));
+
 console.log('== 符号链接逃逸（realpath 防护，创建失败则跳过）==');
 const fsTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-fence-fs-'));
 const realRoot = path.join(fsTmp, 'root');
