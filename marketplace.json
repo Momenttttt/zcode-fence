@@ -1,0 +1,14 @@
+{
+  "name": "zcode-fence-market",
+  "description": "Local marketplace for zcode-fence (repo root as marketplace source)",
+  "plugins": [
+    {
+      "name": "zcode-fence",
+      "source": "./plugins/zcode-fence",
+      "description": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies.",
+      "version": "1.0.0",
+      "category": "developer-tools",
+      "keywords": ["security", "hooks", "windows", "fence", "guard"]
+    }
+  ]
+}

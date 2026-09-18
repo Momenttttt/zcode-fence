@@ -1,0 +1,17 @@
+{
+  "name": "zcode-fence-repo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Cross-platform ZCode fence plugin: catastrophic-command gate + project write fence. Windows-first, ask-only, zero dependencies.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16"
+  },
+  "scripts": {
+    "test": "node tests/unit.js && node tests/run.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Momenttttt/zcode-fence.git"
+  }
+}

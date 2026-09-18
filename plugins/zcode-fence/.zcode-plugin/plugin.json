@@ -1,0 +1,47 @@
+{
+  "name": "zcode-fence",
+  "version": "1.0.0",
+  "description": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies.",
+  "description_i18n": {
+    "en": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies.",
+    "zh-CN": "Windows 一等公民的项目围栏 + 灾难级命令门。纯规则匹配、ask-only、零依赖，只加锁不改锁。"
+  },
+  "author": {
+    "name": "zcode-fence contributors"
+  },
+  "license": "MIT",
+  "keywords": ["security", "hooks", "windows", "fence", "guard", "workspace"],
+  "skills": "skills",
+  "userConfig": {
+    "enable_danger_gate": {
+      "type": "boolean",
+      "default": true,
+      "title": "危险命令门",
+      "description": "拦截 rm -rf /、del /s /q C:\\、format、dd of=/dev/…、fork 炸弹等灾难级命令，命中即弹确认（ask）。"
+    },
+    "enable_fence": {
+      "type": "boolean",
+      "default": true,
+      "title": "项目围栏",
+      "description": "文件写入限制在项目根 + 真实临时目录 + 额外可写根内；越界写入弹确认（ask）。"
+    },
+    "custom_rules": {
+      "type": "string",
+      "default": "",
+      "title": "自定义危险规则",
+      "description": "分号 ; 分隔的 JS 正则（区分大小写），整条命令文本命中即 ask。正则内不能出现分号。"
+    },
+    "extra_writable_roots": {
+      "type": "string",
+      "default": "",
+      "title": "额外可写根",
+      "description": "分号 ; 分隔的目录，支持 ~ 与环境变量（$VAR / %VAR%）。多文件夹项目把其余目录加进来。"
+    },
+    "enable_log": {
+      "type": "boolean",
+      "default": true,
+      "title": "决策日志",
+      "description": "每次判定（ask/silent/异常）写入插件数据目录 decisions.log，便于事后审计。"
+    }
+  }
+}
