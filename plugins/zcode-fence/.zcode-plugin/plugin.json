@@ -4,7 +4,7 @@
   "description": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies.",
   "description_i18n": {
     "en": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies.",
-    "zh-CN": "Windows 一等公民的项目围栏 + 灾难级命令门。纯规则匹配、ask-only、零依赖，只加锁不改锁。"
+    "zh-CN": "以 Windows 为优先平台的项目围栏 + 灾难级命令门。纯规则匹配、ask-only、零依赖，只加锁不改锁。"
   },
   "author": {
     "name": "zcode-fence contributors"
