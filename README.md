@@ -1,5 +1,7 @@
 # zcode-fence
 
+**简体中文** ｜ [English](README_EN.md)
+
 **ZCode 确定性围栏插件：危险命令门 + 项目围栏。Windows 一等公民，三平台可用，ask-only，零依赖（Node ≥ 16）。**
 
 日常开着「完全访问」模式时，你需要的不是又一个权限档位，而是一层**确定性的事前防护**：AI 意外执行 `rm -rf C:/Users`、把文件写到桌面/home 这类灾难，先弹个确认框再放行。同一条命令永远得到同一判定——纯规则匹配，无 AI 判断、无网络请求、无第三方依赖。
@@ -73,7 +75,7 @@ hook 的 `allow` 唯一效果是跳过宿主例行询问——**只会让模式�
 
 ## CLI 自测与决策日志
 
-不依赖 ZCode，直接打印判定结果（stdout 与 hook 输出完全一致，人读摘要打到 stderr）：
+不依赖 ZCode，直接打印判定结果。stdout 与 hook 输出完全一致（ask 时打印决策 JSON，放行时为空，方便脚本消费）；另在 stderr 打一行人读摘要（如 `decision=silent（无输出，交还宿主）`），排障时肉眼即可确认判定：
 
 ```bash
 export ZCODE_PROJECT_DIR="$PWD"

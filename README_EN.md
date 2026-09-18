@@ -1,5 +1,7 @@
 # zcode-fence
 
+[简体中文](README.md) ｜ **English**
+
 **A deterministic fence plugin for ZCode: catastrophic-command gate + project write fence. Windows-first, works on all three platforms, ask-only, zero dependencies (Node ≥ 16).**
 
 When you run ZCode in "full access" mode, what you need is not another permission level but a **deterministic pre-flight guard**: if the AI accidentally runs `rm -rf C:/Users` or writes files to your desktop/home, ask first. The same command always gets the same verdict — pure rule matching, no AI judgment, no network requests, no third-party dependencies.
@@ -73,7 +75,7 @@ Configured in the ZCode plugin settings UI, persisted under `plugins.options["zc
 
 ## CLI self-test & decision log
 
-Print verdicts without ZCode (stdout is byte-identical to hook output; human summary goes to stderr):
+Print verdicts without ZCode. stdout is byte-identical to hook output (the ask JSON, or empty when passing — safe for scripts to consume), while stderr gets a one-line human-readable summary (e.g. `decision=silent`) so you can eyeball the verdict while debugging:
 
 ```bash
 export ZCODE_PROJECT_DIR="$PWD"
