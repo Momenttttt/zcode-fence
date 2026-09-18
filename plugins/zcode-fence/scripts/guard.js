@@ -606,10 +606,12 @@ const DEST_FLAG = {
 
 function judgeWriteTarget(rawTok, ctx, cmdLabel) {
   const info = normalizePath(rawTok, ctx.npBash);
-  if (info.kind === 'null' || info.kind === 'relative' || info.kind === 'empty') return null;
+  if (info.kind === 'empty') return null;
+  // 未定义变量（如 Unix 上的 %USERPROFILE%）→ 无法判定归属，宁可多问一句
   if (info.kind === 'unresolved' || info.unresolved) {
     return '[' + PLUGIN_ID + ': 路径无法解析] ' + rawTok + ' 含未定义变量，无法判定归属，请改用明确路径';
   }
+  if (info.kind === 'null' || info.kind === 'relative') return null;
   if (!ctx.roots || !ctx.roots.length) return null; // ZCODE_PROJECT_DIR 缺失 → 围栏降级
   if (!isInsideRoots(info.norm, ctx.roots, ctx.platform)) {
     return '[' + PLUGIN_ID + ': 越界写入] ' + cmdLabel + ' 的目标 ' + info.norm + ' 不在项目/临时目录等可写根内';
@@ -702,16 +704,17 @@ function judgeFileTool(toolName, target, ctx, add) {
   if (!ctx.cfg.enable_fence || !ctx.projectDir) return;
   let info = normalizePath(target, ctx.npFile);
   if (info.kind === 'empty') return;
+  // 未定义变量优先判定（相对路径拼接前），与 Bash 侧口径一致
+  if (info.kind === 'unresolved' || info.unresolved) {
+    add('[' + PLUGIN_ID + ': 路径无法解析] ' + target + ' 含未定义变量，无法判定归属');
+    return;
+  }
   if (info.kind === 'relative') {
     // 文件工具目标理论上总是绝对路径；万一相对，按项目根解析后再判
     const sep = ctx.platform === 'win32' ? '\\' : '/';
     info = normalizePath(ctx.projectDir + sep + info.norm, ctx.npFile);
   }
   if (info.kind === 'null' || info.kind === 'relative' || info.kind === 'empty') return;
-  if (info.kind === 'unresolved' || info.unresolved) {
-    add('[' + PLUGIN_ID + ': 路径无法解析] ' + target + ' 含未定义变量，无法判定归属');
-    return;
-  }
   if (!isInsideRoots(info.norm, ctx.roots, ctx.platform)) {
     add('[' + PLUGIN_ID + ': 越界写入] ' + (toolName || 'Write') + ' 目标 ' + info.norm + ' 不在项目/临时目录等可写根内');
   }
