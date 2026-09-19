@@ -1,6 +1,8 @@
-# zcode-fence
+<p align="center"><img src="assets/icon.png" width="120" alt="zcode-fence 图标"></p>
 
-**简体中文** ｜ [English](README_EN.md)
+<p align="center"><strong>简体中文</strong> ｜ <a href="README_EN.md">English</a></p>
+
+# zcode-fence
 
 **ZCode 确定性围栏插件：危险命令门 + 项目围栏。Windows 优先适配，三平台可用；ask-only，零依赖（Node ≥ 16）。**
 

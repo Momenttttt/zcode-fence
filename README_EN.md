@@ -1,6 +1,8 @@
-# zcode-fence
+<p align="center"><img src="assets/icon.png" width="120" alt="zcode-fence icon"></p>
 
-[简体中文](README.md) ｜ **English**
+<p align="center"><a href="README.md">简体中文</a> ｜ <strong>English</strong></p>
+
+# zcode-fence
 
 **A deterministic fence plugin for ZCode: catastrophic-command gate + project write fence. Windows-first, works on all three platforms, ask-only, zero dependencies (Node ≥ 16).**
 
