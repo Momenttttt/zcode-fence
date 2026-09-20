@@ -1,7 +1,7 @@
 {
   "name": "zcode-fence-repo",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.3",
   "description": "Cross-platform ZCode fence plugin: catastrophic-command gate + project write fence. Windows-first, ask-only, zero dependencies.",
   "license": "MIT",
   "engines": {

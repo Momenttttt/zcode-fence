@@ -107,7 +107,7 @@ npm test   # node tests/unit.js && node tests/run.js
 - `tests/run.js`: acceptance cases (`tests/cases.json`) all exercise the real entry points (`--eval` / stdin), with global invariants: **no case may ever produce allow/deny output** (ask-only is a project-level decision), ask output must exactly match the host schema, and marketplace.json/plugin.json versions must stay in sync;
 - CI: GitHub Actions tri-platform matrix (windows/ubuntu/macos + a node16 compatibility job).
 
-Release reminder: bump `version` in both `marketplace.json` and `plugins/zcode-fence/.zcode-plugin/plugin.json` together (enforced by a test).
+Release reminder: bump `version` in `marketplace.json`, `plugins/zcode-fence/.zcode-plugin/plugin.json` and its Claude-compatible copy `plugins/zcode-fence/.claude-plugin/plugin.json` together (enforced by a test).
 
 ## License
 

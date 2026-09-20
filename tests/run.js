@@ -8,7 +8,8 @@
  *   1. 任何用例的期望输出不得是 allow/deny（ask-only 是项目级设计决定）；
  *   2. ask 输出必须严格符合宿主 schema（多余 key 宿主会拒收）；
  *   3. 所有用例 exit code 必须为 0（fail-open 不以非零码结束）；
- *   4. marketplace.json 与 plugin.json 的 version 必须一致（§六.14）。
+ *   4. marketplace.json、.zcode-plugin/plugin.json 与其兼容拷贝 .claude-plugin/plugin.json
+ *      三处 version/name 必须一致，且 .claude-plugin 拷贝不得漂移（§六.14 + 官方 validate.py 对齐）。
  */
 
 const assert = require('assert');
@@ -153,19 +154,38 @@ function assertResult(c, res) {
   throw new Error('unknown expect: ' + c.expect);
 }
 
-/* ---------- 版本一致性（§六.14）与其他静态检查 ---------- */
+/* ---------- 版本一致性（§六.14）与官方格式静态检查（对齐 zcode-plugins/scripts/validate.py） ---------- */
 
 function staticChecks() {
   const errs = [];
   const mk = JSON.parse(fs.readFileSync(path.join(ROOT, 'marketplace.json'), 'utf8'));
   const pj = JSON.parse(fs.readFileSync(path.join(ROOT, 'plugins', 'zcode-fence', '.zcode-plugin', 'plugin.json'), 'utf8'));
+  const cp = JSON.parse(fs.readFileSync(path.join(ROOT, 'plugins', 'zcode-fence', '.claude-plugin', 'plugin.json'), 'utf8'));
+
+  // .claude-plugin 是 Claude 兼容清单，官方示例为 .zcode-plugin 的同内容拷贝——整份相等防漂移
+  try { assert.deepStrictEqual(cp, pj); }
+  catch (e) { errs.push('.claude-plugin/plugin.json 与 .zcode-plugin/plugin.json 内容不一致（兼容拷贝必须同步维护）'); }
+
+  // 市场顶层：owner + 非空 description + description_i18n（en/zh-CN）
+  if (!mk.owner || !mk.owner.name) errs.push('marketplace.json 顶层缺 owner.name');
+  if (!mk.description) errs.push('marketplace.json 顶层缺非空 description');
+  const i18nOK = (o) => o && typeof o.en === 'string' && o.en && typeof o['zh-CN'] === 'string' && o['zh-CN'];
+  if (!i18nOK(mk.description_i18n)) errs.push('marketplace.json 顶层 description_i18n 缺 en/zh-CN 非空项');
+
   const entry = mk.plugins && mk.plugins[0];
   if (!entry) errs.push('marketplace.json 缺 plugins[0]');
   else {
     if (entry.version !== pj.version) errs.push('版本不一致: marketplace=' + entry.version + ' plugin=' + pj.version);
     if (entry.name !== pj.name) errs.push('插件名不一致: marketplace=' + entry.name + ' plugin=' + pj.name);
+    // 官方规则：plugin.json 的 description_i18n 必须与市场条目完全相等
+    try { assert.deepStrictEqual(entry.description_i18n, pj.description_i18n); }
+    catch (e) { errs.push('description_i18n 不一致: marketplace 与 plugin.json 必须完全相等'); }
+    const categories = ['developer-tools', 'productivity', 'utilities', 'guides', 'finance', 'template', 'other'];
+    if (categories.indexOf(entry.category) < 0) errs.push('category 不在官方白名单: ' + entry.category);
   }
   if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(pj.name)) errs.push('插件名不符合官方清单正则: ' + pj.name);
+  if (!pj.description) errs.push('plugin.json 缺 description');
+  if (!i18nOK(pj.description_i18n)) errs.push('plugin.json description_i18n 缺 en/zh-CN 非空项');
   if (!pj.userConfig || !pj.userConfig.custom_rules) errs.push('plugin.json 缺 userConfig.custom_rules');
 
   const hj = JSON.parse(fs.readFileSync(path.join(ROOT, 'plugins', 'zcode-fence', 'hooks', 'hooks.json'), 'utf8'));

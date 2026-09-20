@@ -109,7 +109,7 @@ npm test   # node tests/unit.js && node tests/run.js
   ask 输出必须精确符合宿主 schema、marketplace.json 与 plugin.json 版本必须一致；
 - CI：GitHub Actions 三平台矩阵（windows/ubuntu/macos + node16 兼容作业）。
 
-发版提醒：`marketplace.json` 与 `plugins/zcode-fence/.zcode-plugin/plugin.json` 的 `version` 必须同步修改（有测试把关）。
+发版提醒：`marketplace.json` 与 `plugins/zcode-fence/.zcode-plugin/plugin.json`、`plugins/zcode-fence/.claude-plugin/plugin.json`（Claude 兼容拷贝）三处的 `version` 必须同步修改（有测试把关）。
 
 ## License
 
