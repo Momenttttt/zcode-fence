@@ -377,6 +377,8 @@ function extractRedirects(seg) {
  * ================================================================ */
 
 const PREFIX_CMDS = new Set(['sudo', 'env', 'nohup', 'nice', 'time', 'command', 'exec', 'strace', 'valgrind']);
+// bash 控制流关键字：分段后可能落在段首（`; then rm ...`），跳过后继续 dispatch 真正的命令词
+const CONTROL_FLOW = new Set(['then', 'do', 'else', 'elif', 'done', 'fi', 'esac', 'in', '{', '}', '!']);
 
 function parseCmd(tokens) {
   let i = 0;
@@ -389,7 +391,7 @@ function parseCmd(tokens) {
     const slash = Math.max(base.lastIndexOf('/'), base.lastIndexOf('\\'));
     if (slash >= 0) base = base.slice(slash + 1);
     base = base.toLowerCase().replace(/\.(exe|cmd|bat|com|ps1)$/, '');
-    if (PREFIX_CMDS.has(base)) { i++; continue; }
+    if (PREFIX_CMDS.has(base) || CONTROL_FLOW.has(base)) { i++; continue; }
     return { name: base, args: tokens.slice(i + 1) };
   }
   return null;
@@ -404,6 +406,10 @@ const RE_FORK = /:\s*\(\)\s*\{[^}]*[|&][^}]*[|&][^}]*\}\s*;?\s*:/;
 const WIN_DEL_CMDS = new Set(['del', 'rd', 'rmdir', 'erase']);
 const PS_REMOVE = new Set(['remove-item', 'ri', 'rm', 'del', 'erase', 'rd']);
 const PS_DISK_KILLER = new Set(['format-volume', 'clear-disk', 'remove-partition', 'initialize-disk', 'reset-physicaldisk']);
+// 关机/重启族：无路径的系统级破坏（2026-09 调研 Codex/Kimi 后补充；正常开发工作流不会触碰）
+const POWER_CMDS = new Set(['shutdown', 'halt', 'poweroff', 'reboot', 'stop-computer', 'restart-computer']);
+const SYSTEMCTL_KILLERS = new Set(['poweroff', 'reboot', 'halt', 'kexec']);
+const BCDEDIT_WRITE_FLAGS = /^\/(set|delete|import|restore)$/i;
 const REG_HIVES = {
   hklm: 1, hkcu: 1, hkcr: 1, hku: 1, hkcc: 1,
   hkey_local_machine: 1, hkey_current_user: 1, hkey_classes_root: 1, hkey_users: 1, hkey_current_config: 1,
@@ -519,6 +525,29 @@ function gateSegment(seg, ctx, depth, add) {
     if (/^delete\s+shadows/i.test(rest)) gateReason(add, 'vssadmin 删除卷影副本', 'DG-VSSADMIN');
     return;
   }
+  if (POWER_CMDS.has(name)) {
+    // shutdown /a 中止关机、-k 仅广播警告 → 放行（零误报）
+    if (name === 'shutdown' && args.some((a) => /^[-/](a|k)$/i.test(a))) return;
+    gateReason(add, name + ' 关机/重启命令', 'DG-POWEROFF');
+    return;
+  }
+  if (name === 'systemctl') {
+    const sub = args.find((a) => SYSTEMCTL_KILLERS.has(String(a).toLowerCase()));
+    if (sub) gateReason(add, 'systemctl 电源控制子命令 ' + sub, 'DG-SYSTEMCTL-POWER');
+    return;
+  }
+  if (name === 'init' || name === 'telinit') {
+    if (args[0] === '0' || args[0] === '6') gateReason(add, name + ' 切换运行级 ' + args[0] + '（关机/重启）', 'DG-INIT-RUNLEVEL');
+    return;
+  }
+  if (name === 'bcdedit') {
+    if (args.some((a) => BCDEDIT_WRITE_FLAGS.test(a))) gateReason(add, 'bcdedit 写引导配置', 'DG-BCDEDIT-WRITE');
+    return;
+  }
+  if (name === 'diskpart') {
+    gateReason(add, 'diskpart 磁盘分区工具', 'DG-DISKPART');
+    return;
+  }
   // ---- 包装器 ----
   if (name === 'powershell' || name === 'pwsh') {
     const payload = psPayloadOf(args);
@@ -570,6 +599,14 @@ function unwrapWrapper(name, args) {
   if (name === 'wsl' || name === 'busybox') {
     const inner = args.join(' ');
     return inner || null;
+  }
+  // eval/trap 的载荷也是 shell 源码：照包装器解包递归判定（trap 'rm -rf /' EXIT）
+  if (name === 'eval') {
+    return args.join(' ') || null;
+  }
+  if (name === 'trap') {
+    const action = args.find((t) => t[0] !== '-');
+    return action || null; // trap -l 等纯开关形态无载荷
   }
   return null;
 }
@@ -674,10 +711,24 @@ function fenceSegment(seg, ctx, depth, add) {
  * 命令级入口 / 文件工具入口 / 上下文
  * ================================================================ */
 
+// 命令替换载荷：$(…) 与 `…`（单层提取；嵌套由递归 depth 兜底，不平衡场景 fail-open）
+const RE_CMDSUB = /\$\(([^()]{1,2000})\)|`([^`]{1,2000})`/g;
+
 function judgeCommand(cmd, ctx, depth, add) {
   if (depth > MAX_DEPTH) return;
   const cmdStr = String(cmd == null ? '' : cmd);
   if (!cmdStr.trim()) return;
+
+  // $()/反引号内嵌命令先行提取递归判定（echo $(rm -rf /)）；外层命令照常分段。
+  // 先收集完再递归：RE_CMDSUB 是全局正则，边扫边递归会被子调用重置 lastIndex 造成死循环
+  const subs = [];
+  RE_CMDSUB.lastIndex = 0;
+  let m;
+  while ((m = RE_CMDSUB.exec(cmdStr)) !== null) {
+    const body = m[1] != null ? m[1] : m[2];
+    if (body && body.trim()) subs.push(body);
+  }
+  for (const sub of subs) judgeCommand(sub, ctx, depth + 1, add);
 
   if (ctx.cfg.enable_danger_gate) {
     // 自定义规则（分号分隔的 JS 正则；编译失败跳过该段不崩溃）

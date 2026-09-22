@@ -27,7 +27,7 @@
 
 两层防护，独立开关：
 
-1. **危险命令门**（`enable_danger_gate`）：token 级精确组合匹配，只收**灾难级**——`rm -rf /`、`rm -rf ~`、`del /s /q C:\Users\x`、`format D:`、`dd of=/dev/sda`、`mkfs`、`diskutil eraseDisk`、fork 炸弹、`--no-preserve-root`、`chmod -R` 作用于根/home、PowerShell `Remove-Item` 作用于盘根/home、`reg delete` 根键、`cipher /w:`、`vssadmin delete shadows` 等；支持自定义正则。
+1. **危险命令门**（`enable_danger_gate`）：token 级精确组合匹配，只收**灾难级**——`rm -rf /`、`rm -rf ~`、`del /s /q C:\Users\x`、`format D:`、`dd of=/dev/sda`、`mkfs`、`diskutil eraseDisk`、fork 炸弹、`--no-preserve-root`、`chmod -R` 作用于根/home、PowerShell `Remove-Item` 作用于盘根/home、`reg delete` 根键、`cipher /w:`、`vssadmin delete shadows`、`shutdown`/`reboot` 等关机重启命令、`systemctl poweroff`、`bcdedit` 写引导、`diskpart` 等；并能穿透 `trap`/`eval`/`$()`/反引号载荷与 `then`/`do` 等控制流关键字，识别内藏的危险命令；支持自定义正则。
 2. **项目围栏**（`enable_fence`）：文件写入限制在**可写根**内 = 项目根（宿主注入的 `ZCODE_PROJECT_DIR`）+ 当前平台**真实临时目录**（Windows 读 `TEMP`/`TMP`，Unix 用 `TMPDIR` 且 `/tmp` 保留）+ ZCode 项目记忆目录（`~/.zcode/cli/memories`，宿主记忆功能高频写入，默认放行）+ 用户配置的额外可写根。Bash 命令按启发式判定（重定向目标、cp/mv/tar/curl/tee 等写命令的目标参数），文件工具（Write/Edit/ApplyPatch）做精确判定（realpath + 符号链接逐级上溯防偷渡）。
 
 **零误报哲学**：项目内行为由你自己的提示词约束，插件只管「灾难」和「越界」两件事。
