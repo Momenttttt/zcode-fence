@@ -53,6 +53,19 @@
   { "id": "DG-51", "group": "危险门", "desc": "trap/eval 无害载荷放行（零误报守护）", "mode": "bash", "command": "trap 'echo done' EXIT", "expect": "silent" },
   { "id": "DG-52", "group": "危险门", "desc": "eval 无害载荷放行（零误报守护）", "mode": "bash", "command": "eval \"echo hi\"", "expect": "silent" },
 
+  { "id": "DG-53", "group": "危险门", "desc": "node -e rmSync 整个 C:/Windows（2026-09-28 真实盲区复现）", "mode": "bash", "command": "node -e \"require('fs').rmSync('C:/Windows',{recursive:true})\"", "expect": "ask" },
+  { "id": "DG-54", "group": "危险门", "desc": "node -e 变量间接删除用户目录（Users 直系）", "mode": "bash", "command": "node -e \"const fs=require('fs');const p='C:/Users/victim';fs.rmSync(p,{recursive:true})\"", "expect": "ask" },
+  { "id": "DG-55", "group": "危险门", "desc": "node -p（print 形态同样执行 JS）rmSync 盘根", "mode": "bash", "command": "node -p \"require('fs').rmSync('D:/',{recursive:true})\"", "expect": "ask" },
+  { "id": "DG-56", "group": "危险门", "desc": "node --eval 长开关形态", "mode": "bash", "command": "node --eval \"require('fs').rmSync('D:/',{recursive:true})\"", "expect": "ask" },
+  { "id": "DG-57", "group": "危险门", "desc": "python -c shutil.rmtree 整个 /home", "mode": "bash", "command": "python -c \"import shutil\nshutil.rmtree('/home')\"", "expect": "ask" },
+  { "id": "DG-58", "group": "危险门", "desc": "ruby -e FileUtils.rm_rf('/usr')", "mode": "bash", "command": "ruby -e \"require 'fileutils'\nFileUtils.rm_rf('/usr')\"", "expect": "ask" },
+  { "id": "DG-59", "group": "危险门", "desc": "perl -e unlink('/etc')", "mode": "bash", "command": "perl -e \"unlink('/etc')\"", "expect": "ask" },
+  { "id": "DG-60", "group": "危险门", "desc": "node -e 纯读系统文件放行（零误报守护）", "mode": "bash", "command": "node -e \"console.log(require('fs').readFileSync('C:/Windows/win.ini','utf8'))\"", "expect": "silent" },
+  { "id": "DG-61", "group": "危险门", "desc": "python -c 纯读 skill-lock 放行（真实误报回归，日志原始形态）", "mode": "bash", "command": "python -c \"import json\nd=json.load(open(r'C:/Users/alice/.agents/.skill-lock.json',encoding='utf-8'))\nprint(len(d))\"", "expect": "silent" },
+  { "id": "DG-62", "group": "危险门", "desc": "node -e 纯计算放行（零误报守护）", "mode": "bash", "command": "node -e \"console.log(1+2+3)\"", "expect": "silent" },
+  { "id": "DG-63", "group": "危险门", "desc": "node 跑脚本文件不判载荷（文档化盲区，同 powershell -File）", "mode": "bash", "command": "node build.js --out C:/Users/alice/x.txt", "expect": "silent" },
+  { "id": "DG-64", "group": "危险门", "desc": "node -e 写相对路径放行（cwd 未知无法定归属）", "mode": "bash", "command": "node -e \"require('fs').writeFileSync('out.txt','x')\"", "expect": "silent" },
+
   { "id": "FB-01", "group": "围栏-Bash", "desc": "盘符路径重定向越界", "mode": "bash", "command": "echo x > C:/Users/alice/Desktop/pwn.txt", "expect": "ask" },
   { "id": "FB-02", "group": "围栏-Bash", "desc": "带引号的盘符重定向（引号穿透修复）", "mode": "bash", "command": "echo x > \"C:/Users/alice/Desktop/pwn.txt\"", "expect": "ask" },
   { "id": "FB-03", "group": "围栏-Bash", "desc": "MSYS 路径重定向", "mode": "bash", "command": "echo x > /c/Users/alice/pwn.txt", "expect": "ask" },
@@ -86,6 +99,19 @@
   { "id": "FB-31", "group": "围栏-Bash", "desc": "重定向写 ZCode 项目记忆目录 → 放行（默认白名单，记忆功能高频写入）", "mode": "bash", "command": "echo x > {MEM}/projects/demo/memory/note.md", "expect": "silent" },
   { "id": "FB-32", "group": "围栏-Bash", "desc": "rm -rf ~/.zcode 仍 ask（白名单仅限记忆子树，不含整个 .zcode）", "mode": "bash", "command": "rm -rf ~/.zcode", "expect": "ask" },
 
+  { "id": "FB-33", "group": "围栏-Bash", "desc": "node -e 变量间接写 skill-lock（2026-09-28 真实事件复现：writeFileSync(p) + 路径字面量共现）", "mode": "bash", "command": "node -e \"const fs=require('fs');const p='C:/Users/alice/.agents/.skill-lock.json';fs.writeFileSync(p,'x')\"", "expect": "ask" },
+  { "id": "FB-34", "group": "围栏-Bash", "desc": "python -c open 写模式越界（'w' 命中、纯读 'r' 不命中）", "mode": "bash", "command": "python -c \"open('C:/Users/alice/x.txt','w').write('pwn')\"", "expect": "ask" },
+  { "id": "FB-35", "group": "围栏-Bash", "desc": "python -c shutil.copy 目标越界", "mode": "bash", "command": "python -c \"import shutil\nshutil.copy('a.txt','C:/Users/alice/b.txt')\"", "expect": "ask" },
+  { "id": "FB-36", "group": "围栏-Bash", "desc": "node -e 写项目内放行（agent 高频真实形态回归）", "mode": "bash", "command": "node -e \"require('fs').writeFileSync('{PROJECT}/out.json','x')\"", "expect": "silent" },
+  { "id": "FB-37", "group": "围栏-Bash", "desc": "node -e 写临时目录放行", "mode": "bash", "command": "node -e \"require('fs').writeFileSync('{TEMP}/ok.txt','x')\"", "expect": "silent" },
+  { "id": "FB-38", "group": "围栏-Bash", "desc": "node -e 写额外可写根放行", "mode": "bash", "command": "node -e \"require('fs').writeFileSync('{EXTRA}/ok.txt','x')\"", "expect": "silent", "config": "extra-roots" },
+  { "id": "FB-39", "group": "围栏-Bash", "desc": "危险门关闭 → 围栏层独立兜底 node -e 删系统目录（两层独立）", "mode": "bash", "command": "node -e \"require('fs').rmSync('C:/Windows',{recursive:true})\"", "expect": "ask", "config": "gate-off" },
+  { "id": "FB-40", "group": "围栏-Bash", "desc": "围栏关闭 → 危险门层独立拦截 node -e 删系统目录（两层独立）", "mode": "bash", "command": "node -e \"require('fs').rmSync('C:/Windows',{recursive:true})\"", "expect": "ask", "config": "fence-off" },
+  { "id": "FB-41", "group": "围栏-Bash", "desc": "载荷混合读写：读源界外被保守判写 → ask（已知近似，ask 可批准）", "mode": "bash", "command": "node -e \"const a=require('fs').readFileSync('C:/Users/alice/src.json','utf8');require('fs').writeFileSync('{PROJECT}/out.json',a)\"", "expect": "ask" },
+  { "id": "FB-42", "group": "围栏-Bash", "desc": "载荷内 URL 不产生伪路径 token（零误报守护）", "mode": "bash", "command": "node -e \"require('https').get('https://example.com/a/b',function(r){console.log(r.statusCode)})\"", "expect": "silent" },
+  { "id": "FB-43", "group": "围栏-Bash", "desc": "node -e 写 MSYS 形态界外路径", "mode": "bash", "command": "node -e \"require('fs').writeFileSync('/c/Users/alice/x.txt','x')\"", "expect": "ask" },
+  { "id": "FB-44", "group": "围栏-Bash", "desc": "node -e 载荷 + 外层重定向越界（重定向目标照常判）", "mode": "bash", "command": "node -e \"console.log(1)\" > C:/Users/alice/log.txt", "expect": "ask" },
+
   { "id": "FF-01", "group": "围栏-文件工具", "desc": "项目内写 → 沉默（交还宿主按其模式处理）", "mode": "file", "tool": "Write", "file_path": "{PROJECT}/src/main.ts", "expect": "silent" },
   { "id": "FF-02", "group": "围栏-文件工具", "desc": "写桌面 → ask", "mode": "file", "tool": "Write", "file_path": "C:/Users/alice/Desktop/a.txt", "expect": "ask" },
   { "id": "FF-03", "group": "围栏-文件工具", "desc": "写真实 %TEMP% 下 → 放行（临时目录必须可用）", "mode": "file", "tool": "Write", "file_path": "{TEMP}/zcode-fence-test.txt", "expect": "silent" },
@@ -104,5 +130,13 @@
   { "id": "RB-06", "group": "健壮性", "desc": "stdin 缺 tool_input → 放行", "mode": "stdin", "tool": "Bash", "expect": "silent" },
   { "id": "RB-07", "group": "健壮性", "desc": "stdin 完整载荷（含全部宿主实测字段）→ ask 且 schema 精确", "mode": "stdin", "tool": "Bash", "command": "rm -rf /", "expect": "ask", "strictSchema": true },
   { "id": "RB-08", "group": "健壮性", "desc": "stdin 文件工具 tool_input.path 兼容字段 → ask", "mode": "stdin", "tool": "Write", "path": "C:/Users/alice/Desktop/via-path.txt", "expect": "ask" },
-  { "id": "RB-09", "group": "健壮性", "desc": "不认识的工具名 → 放行", "mode": "stdin", "tool": "WebSearch", "query": "x", "expect": "silent" }
+  { "id": "RB-09", "group": "健壮性", "desc": "不认识的工具名 → 放行", "mode": "stdin", "tool": "WebSearch", "query": "x", "expect": "silent" },
+
+  { "id": "SL-01", "group": "会话根锁定", "desc": "首见：注入项目根，写项目内 → silent 并锁定（组内顺序依赖）", "mode": "stdin", "tool": "Bash", "session_id": "sess-lock-a", "command": "echo ok > {PROJECT}/a.txt", "expect": "silent" },
+  { "id": "SL-02", "group": "会话根锁定", "desc": "漂移进子目录：注入 {PROJECT}/sub，写项目根文件 → 按首见根判 silent（2026-09-28 vedio 误报复现，锁定修复）", "mode": "stdin", "tool": "Bash", "session_id": "sess-lock-a", "projectDir": "{PROJECT}/sub", "command": "echo x > {PROJECT}/b.txt", "expect": "silent" },
+  { "id": "SL-03", "group": "会话根锁定", "desc": "漂移进子目录：写子目录内 → 仍在首见根内 silent", "mode": "stdin", "tool": "Bash", "session_id": "sess-lock-a", "projectDir": "{PROJECT}/sub", "command": "echo x > {PROJECT}/sub/c.txt", "expect": "silent" },
+  { "id": "SL-04", "group": "会话根锁定", "desc": "漂移出项目：注入界外根，写界外 → 按首见根判 ask（堵 cd 出项目围栏失效的削弱面）", "mode": "stdin", "tool": "Bash", "session_id": "sess-lock-a", "projectDir": "C:/Users/alice", "command": "echo x > C:/Users/alice/pwn.txt", "expect": "ask" },
+  { "id": "SL-05", "group": "会话根锁定", "desc": "新会话首见即子目录 → 锁定子目录，子目录内写 silent（会话独立锁定）", "mode": "stdin", "tool": "Bash", "session_id": "sess-lock-b", "projectDir": "{PROJECT}/sub", "command": "echo x > {PROJECT}/sub/d.txt", "expect": "silent" },
+  { "id": "SL-06", "group": "会话根锁定", "desc": "--eval 无 session_id → 不锁定，保持现状漂移行为（注入子目录时写项目根仍 ask）", "mode": "bash", "projectDir": "{PROJECT}/sub", "command": "echo x > {PROJECT}/b.txt", "expect": "ask" },
+  { "id": "SL-07", "group": "会话根锁定", "desc": "lock_session_root 关闭 → 退回现状漂移行为（开关逃生门）", "mode": "stdin", "tool": "Bash", "session_id": "sess-lock-c", "config": "lock-off", "projectDir": "{PROJECT}/sub", "command": "echo x > {PROJECT}/b.txt", "expect": "ask" }
 ]

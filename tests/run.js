@@ -42,6 +42,7 @@ function setup() {
     'invalid.json': opt({ custom_rules: 'special-cleanup;([' }), // 第二段编译失败 → 跳过，第一段仍生效
     'gate-off.json': opt({ enable_danger_gate: 'false' }),
     'fence-off.json': opt({ enable_fence: 'false' }),
+    'lock-off.json': opt({ lock_session_root: 'false' }),
     'extra-roots.json': opt({ extra_writable_roots: EXTRA }),
   };
   for (const [name, obj] of Object.entries(fixtures)) {
@@ -73,6 +74,7 @@ function buildEnv(c) {
   env.ZCODE_FENCE_DATA_DIR = LOGS;
   env.ZCODE_FENCE_CONFIG = path.join(CFGDIR, (c && c.config) ? c.config + '.json' : 'default.json');
   if (c && c.noProject) delete env.ZCODE_PROJECT_DIR;
+  else if (c && c.projectDir) env.ZCODE_PROJECT_DIR = render(c.projectDir, env); // 用例级注入根（会话根锁定的漂移场景）
   else env.ZCODE_PROJECT_DIR = PROJECT;
   return env;
 }
@@ -112,7 +114,7 @@ async function runCase(c) {
     const payload = {
       cwd: PROJECT, hook_event_name: 'PreToolUse', tool_name: c.tool,
       tool_input: ti, tool_use_id: 'test-1', permission_mode: 'bypassPermissions',
-      session_id: 'sess-test', transcript_path: '', riskLevel: 'low',
+      session_id: (c && c.session_id) || 'sess-test', transcript_path: '', riskLevel: 'low',
       sideEffectScope: 'workspace', timestamp: new Date().toISOString(),
       toolCallId: 'tc-1', traceId: 'tr-1', turnId: 'tu-1', agent_type: 'main',
     };

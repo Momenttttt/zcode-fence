@@ -226,6 +226,87 @@ t('写 ZCode 项目记忆目录 → silent（默认白名单）', () => {
   assert.strictEqual(r.reasons.length, 0);
 });
 
+console.log('== 解释器内嵌脚本载荷（node -e / python -c / perl -e / ruby -e）==');
+t('scriptPayloadOf：node -e 提取紧随其后的脚本', () =>
+  assert.strictEqual(guard.scriptPayloadOf('node', ['-e', 'code()']), 'code()'));
+t('scriptPayloadOf：python -c 与 perl 多次 -e 拼接', () => {
+  assert.strictEqual(guard.scriptPayloadOf('python', ['-u', '-c', 'print(1)']), 'print(1)');
+  assert.strictEqual(guard.scriptPayloadOf('perl', ['-e', 'a()', '-e', 'b()']), 'a()\nb()');
+});
+t('scriptPayloadOf：非解释器 / -e 无载荷 / 脚本文件形态 → null', () => {
+  assert.strictEqual(guard.scriptPayloadOf('git', ['-e', 'x']), null);
+  assert.strictEqual(guard.scriptPayloadOf('node', ['-e']), null);
+  assert.strictEqual(guard.scriptPayloadOf('node', ['script.js']), null);
+});
+t('node -e 写界外 → ask（写 API 与路径字面量共现）', () => {
+  const cmd = 'node -e "require(\'fs\').writeFileSync(\'C:/Users/outside/pwn.txt\',\'x\')"';
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv);
+  assert.ok(r.reasons.some((x) => x.indexOf('越界写入') >= 0));
+});
+t('node -e 变量间接写 → ask（2026-09-28 真实事件形态）', () => {
+  const cmd = 'node -e "const fs=require(\'fs\');const p=\'C:/Users/outside/.skill-lock.json\';fs.writeFileSync(p,\'x\')"';
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv);
+  assert.ok(r.reasons.some((x) => x.indexOf('越界写入') >= 0));
+});
+t('node -e 纯读界外 → silent（零误报）', () => {
+  const cmd = 'node -e "console.log(require(\'fs\').readFileSync(\'C:/Users/outside/a.txt\',\'utf8\'))"';
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv);
+  assert.strictEqual(r.reasons.length, 0);
+});
+t('python -c 纯读 → silent（真实误报回归，日志原始形态）', () => {
+  const cmd = 'python -c "import json\nd=json.load(open(r\'C:/Users/outside/.skill-lock.json\',encoding=\'utf-8\'))\nprint(len(d))"';
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv);
+  assert.strictEqual(r.reasons.length, 0);
+});
+t('node -e 写项目内 → silent（agent 高频真实形态）', () => {
+  const inProj = projDir.replace(/\\/g, '/') + '/ok.txt';
+  const cmd = 'node -e "require(\'fs\').writeFileSync(\'' + inProj + '\',\'x\')"';
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv);
+  assert.strictEqual(r.reasons.length, 0);
+});
+t('越界理由披露当前项目根（工作区错位可诊断）', () => {
+  const rb = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: 'echo x > C:/Users/outside/pwn.txt' } }, smokeEnv);
+  assert.ok(rb.reasons.some((x) => x.indexOf('项目根 ' + projDir) >= 0));
+  const rf = guard.judgePayload({ tool_name: 'Write', tool_input: { file_path: 'C:/Users/outside/pwn.txt' } }, smokeEnv);
+  assert.ok(rf.reasons.some((x) => x.indexOf('项目根 ' + projDir) >= 0));
+});
+
+console.log('== 会话根锁定（session-roots.log 状态外置）==');
+const stTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-fence-state-'));
+const stEnv = { ZCODE_FENCE_DATA_DIR: stTmp };
+t('首见写入 + 读回（TSV 行式）', () => {
+  guard.saveSessionRoot(stEnv, 'sess-a', 'E:\\proj\\a');
+  const m = guard.loadSessionRoots(stEnv);
+  assert.strictEqual(m['sess-a'].root, 'E:\\proj\\a');
+});
+t('坏行隔离：半行/非法 session_id 跳过，其余行不受影响', () => {
+  fs.appendFileSync(path.join(stTmp, 'session-roots.log'),
+    'broken-line-no-tabs\n../evil\tC:\\x\t2026-09-01T00:00:00Z\nsess-b\tD:\\proj\\b\t2026-09-01T00:00:00Z\n');
+  const m = guard.loadSessionRoots(stEnv);
+  assert.ok(!m['broken-line-no-tabs']);
+  assert.ok(!m['../evil']);
+  assert.ok(m['sess-b']);
+});
+t('条目上限截断：最旧被清、最新保留（单文件有上界）', () => {
+  for (let i = 0; i < 205; i++) guard.saveSessionRoot(stEnv, 'sess-n' + i, 'E:\\p\\' + i);
+  const m = guard.loadSessionRoots(stEnv);
+  assert.ok(Object.keys(m).length <= 200);
+  assert.ok(!m['sess-n0']);
+  assert.ok(m['sess-n204']);
+});
+t('judgePayload：漂移按首见根判（vedio 复现三步）', () => {
+  const base = Object.assign({}, smokeEnv, { ZCODE_FENCE_DATA_DIR: path.join(stTmp, 's1'), ZCODE_PROJECT_DIR: projDir });
+  const mk = (cmd, root, sid) => guard.judgePayload(
+    { tool_name: 'Bash', tool_input: { command: cmd }, session_id: sid },
+    Object.assign({}, base, { ZCODE_PROJECT_DIR: root }));
+  const inside = projDir.replace(/\\/g, '/') + '/b.txt';
+  const sub = projDir + path.sep + 'sub';
+  assert.strictEqual(mk('echo ok > ' + inside, projDir, 'sess-j1').reasons.length, 0);   // 首见
+  assert.strictEqual(mk('echo x > ' + inside, sub, 'sess-j1').reasons.length, 0);        // 漂移进子目录 → 按首见根 silent
+  assert.ok(mk('echo x > C:/Users/alice/pwn.txt', 'C:\\Users\\alice', 'sess-j1')         // 漂移出项目 → ask
+    .reasons.some((x) => x.indexOf('越界写入') >= 0));
+});
+
 console.log('');
 console.log('单元测试：' + passed + ' 通过，' + failed + ' 失败');
 process.exit(failed ? 1 : 0);

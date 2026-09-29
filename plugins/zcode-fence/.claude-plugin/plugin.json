@@ -1,10 +1,10 @@
 {
   "name": "zcode-fence",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies.",
   "description_i18n": {
     "en": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies.",
-    "zh-CN": "以 Windows 为优先平台的项目围栏 + 灾难级命令门。纯规则匹配、ask-only、零依赖，只加锁不改锁。"
+    "zh-CN": "Windows 优先适配的项目围栏 + 灾难级命令门。纯规则匹配、ask-only、零依赖，只加锁不改锁。"
   },
   "author": {
     "name": "zcode-fence contributors",
@@ -27,6 +27,12 @@
       "default": true,
       "title": "项目围栏",
       "description": "文件写入限制在 项目根 + 真实临时目录 + ZCode 项目记忆目录（~/.zcode/cli/memories）+ 额外可写根内；越界写入弹确认（ask）。"
+    },
+    "lock_session_root": {
+      "type": "boolean",
+      "default": true,
+      "title": "会话根锁定",
+      "description": "按每个会话首次见到的项目根判定，基本就是会话打开时的工作区。宿主注入的项目根会跟着终端 cd 漂移，开启后 cd 进子目录不再误报越界，cd 出项目后围栏不再失效；状态存于插件数据目录 session-roots.log。"
     },
     "custom_rules": {
       "type": "string",

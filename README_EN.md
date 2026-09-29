@@ -27,15 +27,17 @@ Drive-letter paths, Git Bash path styles, Windows environment variables, the rea
 
 Two independent layers:
 
-1. **Danger gate** (`enable_danger_gate`): token-level exact combination matching, catastrophic-only — `rm -rf /`, `rm -rf ~`, `del /s /q C:\Users\x`, `format D:`, `dd of=/dev/sda`, `mkfs`, `diskutil eraseDisk`, fork bombs, `--no-preserve-root`, `chmod -R` on root/home, PowerShell `Remove-Item` on drive roots/home, `reg delete` on root hives, `cipher /w:`, `vssadmin delete shadows`, power commands (`shutdown`/`reboot`, `systemctl poweroff`), `bcdedit` writes, `diskpart`, etc. It also sees through payloads hidden inside `trap`/`eval`/`$()`/backticks or behind control-flow keywords such as `then`/`do`. Custom regex rules supported.
-2. **Project fence** (`enable_fence`): file writes are limited to **writable roots** = project root (host-injected `ZCODE_PROJECT_DIR`) + the **real temp dir of the current platform** (`TEMP`/`TMP` on Windows; `TMPDIR` with `/tmp` kept on Unix) + the ZCode project memory directory (`~/.zcode/cli/memories`, written frequently by the host memory feature, allowed by default) + user-configured extra roots. Bash commands are judged heuristically (redirect targets, destination positions of cp/mv/tar/curl/tee...); file tools (Write/Edit/ApplyPatch) get exact judgment (realpath with per-segment ancestor walk against symlink smuggling).
+1. **Danger gate** (`enable_danger_gate`): token-level exact combination matching, catastrophic-only — `rm -rf /`, `rm -rf ~`, `del /s /q C:\Users\x`, `format D:`, `dd of=/dev/sda`, `mkfs`, `diskutil eraseDisk`, fork bombs, `--no-preserve-root`, `chmod -R` on root/home, PowerShell `Remove-Item` on drive roots/home, `reg delete` on root hives, `cipher /w:`, `vssadmin delete shadows`, power commands (`shutdown`/`reboot`, `systemctl poweroff`), `bcdedit` writes, `diskpart`, etc. It also sees through payloads hidden inside `trap`/`eval`/`$()`/backticks or behind control-flow keywords such as `then`/`do`, and through interpreter `-e`/`-c` payloads (`node -e`, `python -c`) whenever a write API and an absolute-path literal co-occur (e.g. `node -e "…rmSync('C:/Windows'…)"`). Custom regex rules supported.
+2. **Project fence** (`enable_fence`): file writes are limited to **writable roots** = project root (host-injected `ZCODE_PROJECT_DIR`) + the **real temp dir of the current platform** (`TEMP`/`TMP` on Windows; `TMPDIR` with `/tmp` kept on Unix) + the ZCode project memory directory (`~/.zcode/cli/memories`, written frequently by the host memory feature, allowed by default) + user-configured extra roots. Bash commands are judged heuristically (redirect targets, destination positions of cp/mv/tar/curl/tee..., path literals co-occurring with write APIs inside interpreter payloads); file tools (Write/Edit/ApplyPatch) get exact judgment (realpath with per-segment ancestor walk against symlink smuggling).
+
+**Session-root locking** (`lock_session_root`): the host-injected project root actually tracks the Bash current directory — once the agent `cd`s into a subdirectory, every subsequent call (Write/Edit included) drifts along, and `cd`-ing out of the project disables the fence entirely. With locking on, each session is judged against the **first root it saw** (≈ the workspace the session opened in): cd-ing into a subdirectory no longer flags writes to the real project root, and writes after cd-ing out stay fenced. State lives in a single `session-roots.log` in the plugin data directory (one line per session, 30-day expiry, 200-entry cap).
 
 **Zero-false-positive philosophy**: in-project behavior is governed by your own prompts; the plugin only cares about "catastrophe" and "out-of-bounds".
 
 **Non-goals (honest disclosure)**: this is not an OS-level sandbox. It inspects command text before execution; the following evade it by nature (it protects against accidents, not deliberate circumvention):
 
-- writes inside scripts (`python -c "open('/etc/x','w')"`), encoded payloads (`powershell -EncodedCommand`), script file contents (`powershell -File x.ps1`);
-- `cd` out of the project then write relatively (`cd /c/Users/x && touch y` passes — documented blind spot);
+- encoded payloads (`powershell -EncodedCommand`), script file contents (`powershell -File x.ps1`, `node x.js`), writes whose payload carries no path literal (concatenation like `process.env.HOME + '/x'`, or `child_process` re-entering the shell);
+- relative-path writes within the same command (`cd /c/Users/x && touch y` passes — relative targets are not judged; session-root locking already covers absolute-path writes *after* such a cd);
 - network access (ZCode's plugin API cannot control it).
 
 ## ask-only: only tighten, never loosen (the key design decision)
@@ -71,6 +73,7 @@ Configured in the ZCode plugin settings UI, persisted under `plugins.options["zc
 | --- | --- | --- | --- |
 | `enable_danger_gate` | boolean | `true` | Danger gate switch |
 | `enable_fence` | boolean | `true` | Project fence switch |
+| `lock_session_root` | boolean | `true` | Session-root locking: judge against each session's first-seen root and ignore cd drift — no false positives after cd-ing into subdirectories, no fence bypass after cd-ing out. State in session-roots.log |
 | `custom_rules` | string | `""` | Custom danger rules: semicolon-separated JS regexes (case-sensitive), matched against the whole command text; invalid segments are skipped |
 | `extra_writable_roots` | string | `""` | Extra writable roots: semicolon-separated, supports `~`, `$VAR`, `%VAR%`. Add the other folders of multi-folder projects here (the host provides no folder list, so they cannot be inferred) |
 | `enable_log` | boolean | `true` | Decision log switch |

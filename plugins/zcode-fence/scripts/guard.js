@@ -43,6 +43,7 @@ function splitList(s) {
 const DEFAULT_CONFIG = {
   enable_danger_gate: true,
   enable_fence: true,
+  lock_session_root: true,
   custom_rules: '',
   extra_writable_roots: '',
   enable_log: true,
@@ -72,6 +73,7 @@ function loadConfig(env) {
         if (user && typeof user === 'object') {
           cfg.enable_danger_gate = truthy(user.enable_danger_gate, true);
           cfg.enable_fence = truthy(user.enable_fence, true);
+          cfg.lock_session_root = truthy(user.lock_session_root, true);
           cfg.custom_rules = typeof user.custom_rules === 'string' ? user.custom_rules : '';
           cfg.extra_writable_roots = typeof user.extra_writable_roots === 'string' ? user.extra_writable_roots : '';
           cfg.enable_log = truthy(user.enable_log, true);
@@ -554,6 +556,12 @@ function gateSegment(seg, ctx, depth, add) {
     if (payload) psJudge(payload, ctx, depth, add);
     return;
   }
+  // ---- 解释器内嵌脚本（node -e / python -c / perl -e / ruby -e）----
+  const script = scriptPayloadOf(name, args);
+  if (script != null) {
+    scriptJudge(script, ctx, add, name);
+    return;
+  }
   const inner = unwrapWrapper(name, args);
   if (inner != null) {
     judgeCommand(inner, ctx, depth + 1, add);
@@ -620,6 +628,95 @@ function psJudge(payload, ctx, depth, add) {
 }
 
 /* ================================================================
+ * 解释器内嵌脚本载荷（node -e / python -c / perl -e / ruby -e）
+ *
+ * 2026-09-28 真实触发：agent 用 node -e 的 fs.writeFileSync 改写
+ * ~/.agents/.skill-lock.json，围栏因 node 不在写命令表而静默放行。
+ * 启发式（与 psPayloadOf 对称，但不递归 shell 判定——载荷不是 shell 源码）：
+ * 仅当「写 API 调用」与「绝对路径字面量」共现于同一载荷时，路径按写目标判。
+ * 纯读/纯计算载荷零打扰；路径拼接、编码构造、child_process 属对抗性绕过，
+ * 与 powershell -EncodedCommand 同态度：文档化盲区。
+ * ================================================================ */
+
+// 内嵌脚本开关（node 的 -p/--print 同样执行 JS）；perl/ruby 允许多次 -e 拼接
+const SCRIPT_RUNNERS = {
+  node: ['-e', '--eval', '-p', '--print'],
+  nodejs: ['-e', '--eval', '-p', '--print'],
+  python: ['-c'], python3: ['-c'], python2: ['-c'],
+  perl: ['-e'],
+  ruby: ['-e'],
+};
+
+// -e/-c 紧随其后的一个参数是脚本本体；返回拼接载荷，非解释器返回 null
+function scriptPayloadOf(name, args) {
+  const switches = SCRIPT_RUNNERS[name];
+  if (!switches) return null;
+  const parts = [];
+  for (let i = 0; i < args.length; i++) {
+    if (switches.indexOf(args[i].toLowerCase()) >= 0 && i + 1 < args.length) {
+      parts.push(args[i + 1]);
+    }
+  }
+  return parts.length ? parts.join('\n') : null;
+}
+
+// 载荷内写 API 形态（调用式，词边界 + 左括号防 from()/normal( 子串误配；
+// destructuring 后的无前缀调用同样命中）。i 标志覆盖驼峰命名（writeFileSync）。
+// JS 的 process.stdout.write 不在列（纯输出）。
+const SCRIPT_WRITE_RES = [
+  // JavaScript：fs / fsPromises 的写、删除、建目录
+  /\bwritefilesync\s*\(/i, /\bwritefile\s*\(/i,
+  /\bappendfilesync\s*\(/i, /\bappendfile\s*\(/i,
+  /\brmsync\s*\(/i, /\brm\s*\(/i,
+  /\bunlinksync\s*\(/i, /\bunlink\s*\(/i,
+  /\brmdirsync\s*\(/i, /\brmdir\s*\(/i,
+  /\brenamesync\s*\(/i, /\brename\s*\(/i,
+  /\bcopyfilesync\s*\(/i, /\bcopyfile\s*\(/i,
+  /\btruncatesync\s*\(/i, /\btruncate\s*\(/i,
+  /\bmkdirsync\s*\(/i, /\bmkdir\s*\(/i,
+  /\bcreatewritestream\s*\(/i, /\bwritesync\s*\(/i,
+  // Python：open 写模式（'w'/'a'/'x'/'+'，纯读 'r'/'rb' 排除）、os / shutil / pathlib
+  /\bopen\s*\([^)]*['"][rbt]*[wax+][rabt+]*['"]/i,
+  /\bos\s*\.\s*(remove|unlink|rmdir|removedirs|rename|replace|truncate|mkdir|makedirs)\s*\(/i,
+  /\bshutil\s*\.\s*(rmtree|copy|copy2|copyfile|copystat|copytree|move)\s*\(/i,
+  /\bwrite_text\s*\(/i, /\bwrite_bytes\s*\(/i,
+  // Ruby：File./FileUtils. 写形态（File.open(p,'w') 由上面的 open 规则覆盖）
+  /\bfile\s*\.\s*(write|binwrite|delete|rename)\s*\(/i,
+  /\bfileutils\s*\.\s*(rm\w*|mv\w*|cp\w*|install)\b/i,
+  // Perl：双参 open 的写模式（'>'、'>>'、'+<'；纯读 '<' 排除）
+  /\bopen\s*\(\s*[\w:]+\s*,\s*['"][+>]/i,
+];
+
+// 写 API 与绝对路径字面量共现 → 路径按写目标判（危险门 + 围栏两侧自查开关，
+// gateSegment/fenceSegment 各调一次，add 去重；与 psJudge 模式一致）
+function scriptJudge(payload, ctx, add, cmdLabel) {
+  if (!payload) return;
+  // tokenize 保留的 \" 归一为 "（路径内不会出现反斜杠紧邻引号，安全）。
+  // \n \t \r 不归一：Windows 路径 \node、\tmp 的反斜杠是分隔符，展开会截断路径；
+  // 宿主 JSON stdin 场景换行本就是真实换行，字面 \n 仅 --eval 调试语境出现
+  payload = payload.replace(/\\"/g, '"');
+  let hasWrite = false;
+  for (const re of SCRIPT_WRITE_RES) {
+    if (re.test(payload)) { hasWrite = true; break; }
+  }
+  if (!hasWrite) return;
+  for (const tok of extractPathTokens(payload)) {
+    const info = normalizePath(tok, ctx.npBash);
+    // 相对路径无法定归属（cwd 未知）不判；载荷内 $VAR/%VAR% 多为字面量，
+    // 展开失败不追问（与 Bash 命令行 token 的保守追问口径不同，追问必误报）
+    if (info.kind === 'null' || info.kind === 'relative' || info.kind === 'empty' ||
+        info.kind === 'unresolved' || info.unresolved) continue;
+    if (ctx.cfg.enable_danger_gate && isDangerTarget(info, ctx)) {
+      gateReason(add, cmdLabel + ' 内嵌脚本写入灾难级目标 ' + info.norm, 'DG-SCRIPT-WRITE');
+    }
+    if (ctx.cfg.enable_fence && ctx.projectDir && !isInsideRoots(info.norm, ctx.roots, ctx.platform)) {
+      add('[' + PLUGIN_ID + ': 越界写入] ' + cmdLabel + ' 内嵌脚本的写目标 ' + info.norm +
+        ' 不在项目根 ' + ctx.projectDir + ' 等可写根内');
+    }
+  }
+}
+
+/* ================================================================
  * 项目围栏 —— Bash 启发式（只判「写到哪去」，读操作不拦）
  * ================================================================ */
 
@@ -651,7 +748,8 @@ function judgeWriteTarget(rawTok, ctx, cmdLabel) {
   if (info.kind === 'null' || info.kind === 'relative') return null;
   if (!ctx.roots || !ctx.roots.length) return null; // ZCODE_PROJECT_DIR 缺失 → 围栏降级
   if (!isInsideRoots(info.norm, ctx.roots, ctx.platform)) {
-    return '[' + PLUGIN_ID + ': 越界写入] ' + cmdLabel + ' 的目标 ' + info.norm + ' 不在项目/临时目录等可写根内';
+    // 披露当前项目根：会话工作区开错层级时（如开在子目录）用户可一眼诊断
+    return '[' + PLUGIN_ID + ': 越界写入] ' + cmdLabel + ' 的目标 ' + info.norm + ' 不在项目根 ' + ctx.projectDir + ' 等可写根内';
   }
   return null;
 }
@@ -693,10 +791,17 @@ function fenceSegment(seg, ctx, depth, add) {
       if (payload) psJudge(payload, ctx, depth, add); // gate 关闭时围栏侧也兜底判一次
       return;
     }
-    const inner = unwrapWrapper(name, args);
-    if (inner != null) {
-      judgeCommand(inner, ctx, depth + 1, add);
-      return;
+    // 解释器内嵌脚本：写 API 与路径字面量共现才判（gate 关闭时围栏侧也兜底判一次）。
+    // 不提前 return：外层重定向目标（node -e "..." > 界外路径）照常落到尾部判定
+    const script = scriptPayloadOf(name, args);
+    if (script != null) {
+      scriptJudge(script, ctx, add, name);
+    } else {
+      const inner = unwrapWrapper(name, args);
+      if (inner != null) {
+        judgeCommand(inner, ctx, depth + 1, add);
+        return;
+      }
     }
   }
 
@@ -767,11 +872,65 @@ function judgeFileTool(toolName, target, ctx, add) {
   }
   if (info.kind === 'null' || info.kind === 'relative' || info.kind === 'empty') return;
   if (!isInsideRoots(info.norm, ctx.roots, ctx.platform)) {
-    add('[' + PLUGIN_ID + ': 越界写入] ' + (toolName || 'Write') + ' 目标 ' + info.norm + ' 不在项目/临时目录等可写根内');
+    // 披露当前项目根：会话工作区开错层级时（如开在子目录）用户可一眼诊断
+    add('[' + PLUGIN_ID + ': 越界写入] ' + (toolName || 'Write') + ' 目标 ' + info.norm + ' 不在项目根 ' + ctx.projectDir + ' 等可写根内');
   }
 }
 
-function buildContext(env) {
+/* ================================================================
+ * 会话根锁定（lock_session_root，2026-09-29）
+ *
+ * 实测宿主行为：ZCODE_PROJECT_DIR 跟随 Bash 持久 cwd——agent cd 进子目录后，
+ * 后续所有调用（含 Write/Edit）注入的项目根一起漂移。后果：cd 进子目录 →
+ * 写真正项目根被误报（vedio 案例 2026-09-28）；cd 出项目 → 围栏整段失效。
+ * 对策：stdin 载荷带 session_id，插件数据目录存「会话 → 首见根」单文件映射，
+ * 每会话仅首见时写一行，之后纯读；判定永远按首见根（≈会话初始 cwd ≈ 工作区根）。
+ * fail-open：读不了 / 坏行 / 无 session_id / 写失败 → 当首次或按注入根判定，不崩溃。
+ * 已知取舍：会话中途真换工作区会按旧根持续 ask（用户 2026-09-29 确认接受）。
+ * ================================================================ */
+
+const SESSION_ROOTS_FILE = 'session-roots.log';
+const SESSION_ROOTS_MAX = 200;                      // 条目上限，写入时顺带截断（单文件 ≤20KB 有上界）
+const SESSION_ROOTS_TTL_MS = 30 * 24 * 3600 * 1000; // 条目过期，会话不可能存活更久
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;     // session_id 作状态键前的合法性校验
+
+function sessionRootsFile(env) {
+  return path.join(dataDir(env), SESSION_ROOTS_FILE);
+}
+
+// 读「会话 → 首见根」映射；坏行隔离；读失败返回空表（当全部首见）
+function loadSessionRoots(env) {
+  let raw = '';
+  try { raw = fs.readFileSync(sessionRootsFile(env), 'utf8'); } catch (e) { return {}; }
+  const out = {};
+  for (const line of String(raw).split('\n')) {
+    const t = line.split('\t');
+    if (t.length < 3 || !SESSION_ID_RE.test(t[0]) || !t[1]) continue;
+    out[t[0]] = { root: t[1], ts: Date.parse(t[2]) || 0 };
+  }
+  return out;
+}
+
+// 记录首见根并顺带清理（过期/超额删最旧）。写前重读合并其他进程新写的条目，
+// 把并发丢条目窗口压到最小；残余竞态的后果只是该会话下次重新首见（fail-open）。
+function saveSessionRoot(env, sessionId, rootNorm) {
+  try {
+    const file = sessionRootsFile(env);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const now = Date.now();
+    const merged = loadSessionRoots(env);
+    merged[sessionId] = { root: rootNorm, ts: now };
+    const entries = Object.keys(merged)
+      .filter((sid) => now - merged[sid].ts < SESSION_ROOTS_TTL_MS)
+      .sort((a, b) => merged[a].ts - merged[b].ts)
+      .slice(-SESSION_ROOTS_MAX);
+    fs.writeFileSync(file, entries
+      .map((sid) => [sid, merged[sid].root, new Date(merged[sid].ts).toISOString()].join('\t'))
+      .join('\n') + '\n');
+  } catch (e) { /* 状态写失败不影响判定 */ }
+}
+
+function buildContext(env, opts) {
   const platform = process.platform;
   const loaded = loadConfig(env);
   const npFile = { platform, env, msysAlways: false };
@@ -783,6 +942,18 @@ function buildContext(env) {
     const info = normalizePath(env.ZCODE_PROJECT_DIR, npFile);
     if (info.kind === 'drive' || info.kind === 'unix' || info.kind === 'unc') {
       projectDir = realPathBest(info.norm, platform) || info.norm;
+      // 会话根锁定：ZCODE_PROJECT_DIR 跟随 Bash 持久 cwd、cd 即漂移（2026-09-29 实测），
+      // 按 session 首见根判定、漂移被忽略；首见 ≈ 会话初始 cwd ≈ 工作区根
+      const sid = opts && opts.sessionId;
+      if (loaded.cfg.lock_session_root && typeof sid === 'string' && SESSION_ID_RE.test(sid)) {
+        const locked = loadSessionRoots(env)[sid];
+        if (locked && locked.root && locked.root !== projectDir) {
+          loaded.notes.push('项目根漂移：注入 ' + projectDir + ' 与会话首见根 ' + locked.root + ' 不一致，按首见根判定');
+          projectDir = locked.root;
+        } else if (!locked) {
+          saveSessionRoot(env, sid, projectDir);
+        }
+      }
     }
   }
 
@@ -817,7 +988,7 @@ function buildContext(env) {
 }
 
 function judgePayload(p, env) {
-  const ctx = buildContext(env);
+  const ctx = buildContext(env, { sessionId: p && p.session_id });
   const reasons = [];
   const add = (r) => { if (reasons.indexOf(r) < 0) reasons.push(r); };
   const tool = String((p && p.tool_name) || '');
@@ -997,6 +1168,7 @@ module.exports = {
   parseCmd,
   extractPathTokens,
   extractRedirects,
+  scriptPayloadOf,
   isUnder,
   isInsideRoots,
   realPathBest,
@@ -1004,6 +1176,8 @@ module.exports = {
   loadConfig,
   splitList,
   dataDir,
+  loadSessionRoots,
+  saveSessionRoot,
   buildContext,
   judgeCommand,
   judgeFileTool,
