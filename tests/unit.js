@@ -265,10 +265,12 @@ t('node -e 写项目内 → silent（agent 高频真实形态）', () => {
   assert.strictEqual(r.reasons.length, 0);
 });
 t('越界理由披露当前项目根（工作区错位可诊断）', () => {
+  // macOS 的 /var 是 /private/var 符号链接：理由披露的是 realpath 后的根，断言须同样归一
+  const projReal = fs.realpathSync(projDir);
   const rb = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: 'echo x > C:/Users/outside/pwn.txt' } }, smokeEnv);
-  assert.ok(rb.reasons.some((x) => x.indexOf('项目根 ' + projDir) >= 0));
+  assert.ok(rb.reasons.some((x) => x.indexOf('项目根 ' + projReal) >= 0));
   const rf = guard.judgePayload({ tool_name: 'Write', tool_input: { file_path: 'C:/Users/outside/pwn.txt' } }, smokeEnv);
-  assert.ok(rf.reasons.some((x) => x.indexOf('项目根 ' + projDir) >= 0));
+  assert.ok(rf.reasons.some((x) => x.indexOf('项目根 ' + projReal) >= 0));
 });
 
 console.log('== 会话根锁定（session-roots.log 状态外置）==');
