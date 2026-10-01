@@ -700,7 +700,18 @@ function scriptJudge(payload, ctx, add, cmdLabel) {
     if (re.test(payload)) { hasWrite = true; break; }
   }
   if (!hasWrite) return;
-  for (const tok of extractPathTokens(payload)) {
+  // 路径只从字符串字面量里提取：fs API 的真实写路径必在引号内（tokenize 保留了载荷内部
+  // 的单双引号与反引号）；正则字面量 /.../ 无引号，不再被误当 Unix 绝对路径——
+  // matchAll(/span_sec: (\d+)/)、split(/^## /m) 这类 JS 数据处理标配写法曾整批误报（2026-10-01）。
+  // python 无正则字面量语法、路径本就在字符串里，提取结果与全文提取一致。
+  const strToks = [];
+  // 重复体必须用非捕获组（(?:...)）：捕获组放进 (A|B)* 里会被每次迭代重置，只留最后一个字符
+  const RE_STR_LIT = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\\n]|\\.)*`/g;
+  let sm;
+  while ((sm = RE_STR_LIT.exec(payload)) !== null) {
+    for (const t of extractPathTokens(sm[0].slice(1, -1))) strToks.push(t);
+  }
+  for (const tok of strToks) {
     const info = normalizePath(tok, ctx.npBash);
     // 相对路径无法定归属（cwd 未知）不判；载荷内 $VAR/%VAR% 多为字面量，
     // 展开失败不追问（与 Bash 命令行 token 的保守追问口径不同，追问必误报）

@@ -253,6 +253,16 @@ t('node -e 纯读界外 → silent（零误报）', () => {
   const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv);
   assert.strictEqual(r.reasons.length, 0);
 });
+t('载荷内正则字面量不误判为 Unix 路径（2026-10-01 真实误报回归）', () => {
+  const cmd = 'node -e "const fs=require(\'fs\');const sb=fs.readFileSync(\'videos/a.md\',\'utf8\');const n=[...sb.matchAll(/span_sec: (\\d+)/g)].length;fs.writeFileSync(\'videos/out.json\',String(n))"';
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv);
+  assert.strictEqual(r.reasons.length, 0);
+});
+t('字符串字面量内的界外写路径仍拦截（单/双引号形态）', () => {
+  const cmdD = 'node -e "require(\'fs\').writeFileSync(\'C:/Users/outside/d.txt\',\'x\')"';
+  const rD = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmdD } }, smokeEnv);
+  assert.ok(rD.reasons.some((x) => x.indexOf('越界写入') >= 0));
+});
 t('python -c 纯读 → silent（真实误报回归，日志原始形态）', () => {
   const cmd = 'python -c "import json\nd=json.load(open(r\'C:/Users/outside/.skill-lock.json\',encoding=\'utf-8\'))\nprint(len(d))"';
   const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv);

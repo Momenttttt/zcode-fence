@@ -111,6 +111,9 @@
   { "id": "FB-42", "group": "围栏-Bash", "desc": "载荷内 URL 不产生伪路径 token（零误报守护）", "mode": "bash", "command": "node -e \"require('https').get('https://example.com/a/b',function(r){console.log(r.statusCode)})\"", "expect": "silent" },
   { "id": "FB-43", "group": "围栏-Bash", "desc": "node -e 写 MSYS 形态界外路径", "mode": "bash", "command": "node -e \"require('fs').writeFileSync('/c/Users/alice/x.txt','x')\"", "expect": "ask" },
   { "id": "FB-44", "group": "围栏-Bash", "desc": "node -e 载荷 + 外层重定向越界（重定向目标照常判）", "mode": "bash", "command": "node -e \"console.log(1)\" > C:/Users/alice/log.txt", "expect": "ask" },
+  { "id": "FB-45", "group": "围栏-Bash", "desc": "载荷内正则字面量不误判为 Unix 路径（matchAll/split + 项目内写，2026-10-01 真实误报回归）", "mode": "bash", "command": "node -e \"const fs=require('fs');const sb=fs.readFileSync('videos/a.md','utf8');const n=[...sb.matchAll(/span_sec: (\\d+)/g)].length;const b=sb.split(/^## Frame /m).slice(1);fs.writeFileSync('videos/out.json',String(n))\"", "expect": "silent" },
+  { "id": "FB-46", "group": "围栏-Bash", "desc": "正则在场不放松拦截：字符串字面量内的界外写路径照常 ask", "mode": "bash", "command": "node -e \"const n='x'.replace(/a/g,'b');require('fs').writeFileSync('C:/Users/alice/out.json',n)\"", "expect": "ask" },
+  { "id": "FB-47", "group": "围栏-Bash", "desc": "python 正则字符串 + 项目内写放行（解释器载荷提取无回归）", "mode": "bash", "command": "python -c \"import re\ns=open(r'videos/a.md').read()\nopen('videos/out.txt','w').write(str(len(re.findall(r'\\d+', s))))\"", "expect": "silent" },
 
   { "id": "FF-01", "group": "围栏-文件工具", "desc": "项目内写 → 沉默（交还宿主按其模式处理）", "mode": "file", "tool": "Write", "file_path": "{PROJECT}/src/main.ts", "expect": "silent" },
   { "id": "FF-02", "group": "围栏-文件工具", "desc": "写桌面 → ask", "mode": "file", "tool": "Write", "file_path": "C:/Users/alice/Desktop/a.txt", "expect": "ask" },

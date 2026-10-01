@@ -18,7 +18,7 @@
         "en": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies.",
         "zh-CN": "Windows 优先适配的项目围栏 + 灾难级命令门。纯规则匹配、ask-only、零依赖，只加锁不改锁。"
       },
-      "version": "1.3.0",
+      "version": "1.3.1",
       "author": {
         "name": "zcode-fence contributors",
         "url": "https://github.com/Momenttttt/zcode-fence"
