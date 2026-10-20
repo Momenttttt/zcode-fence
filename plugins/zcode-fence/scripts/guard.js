@@ -565,6 +565,9 @@ function resolveAgainstCwd(info, cwd, ctx) {
 
 function resolveTarget(raw, ctx, cwd) {
   const info = normalizePath(raw, ctx.npBash);
+  // 未定义变量（如 Unix 上的 %USERPROFILE%）先于相对路径解析返回：否则 cwd 未知时
+  // 会被当作普通相对路径直接放行，丢失「无法解析 → ask」语义（CI FB-22 回归）。
+  if (info.kind === 'unresolved' || info.unresolved) return info;
   if (info.kind === 'relative') return cwd ? resolveAgainstCwd(info, cwd, ctx) : null;
   return info;
 }

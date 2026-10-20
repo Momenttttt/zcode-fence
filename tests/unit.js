@@ -358,6 +358,12 @@ t('cwd 未知时相对写入保持 fail-open', () => {
   const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: 'touch out.txt' } }, smokeEnv);
   assert.strictEqual(r.reasons.length, 0);
 });
+t('%VAR% 未定义且 cwd 未知 → ask（Unix 上 %USERPROFILE% 回归 FB-22）', () => {
+  const noProfile = Object.assign({}, smokeEnv);
+  delete noProfile.USERPROFILE;
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: 'echo x > %USERPROFILE%\\pwn.txt' } }, noProfile);
+  assert.ok(r.reasons.some((x) => x.indexOf('路径无法解析') >= 0));
+});
 t('pushd/popd 栈跟踪：popd 回到项目内不误报', () => {
   const cmd = 'cd "' + projDir + '" && pushd C:/Users/alice && popd && touch ok.txt';
   const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv);
