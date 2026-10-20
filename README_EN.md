@@ -4,101 +4,143 @@
 
 # zcode-fence
 
-**A deterministic fence plugin for ZCode: catastrophic-command gate + project write fence. Windows-first, works on all three platforms, ask-only, zero dependencies (Node ≥ 16).**
+**Three hard lines around the AI, even in full-access mode: catastrophic commands, out-of-bounds writes, irreversible loss. It asks; it never decides for you.**
 
-When you run ZCode in "full access" mode, what you need is not another permission level but a **deterministic pre-flight guard**: if the AI accidentally runs `rm -rf C:/Users` or writes files to your desktop/home, ask first. With the optional decision-model layer off, the same command always gets the same verdict — deterministic rule matching, no AI judgment, no network activity by default, no third-party dependencies. When you want coverage for semantic risks rules cannot decide statically, an optional decision-model review layer can be enabled explicitly.
+Deterministic rule matching, zero dependencies (Node ≥ 16), no network activity by default. With the optional decision-model layer off, the same command always gets the same verdict. Windows-first, works on macOS and Linux too.
 
-## What it guards against: real accidents on Windows
+## In 30 seconds
 
-Drive-letter paths, Git Bash path styles, Windows environment variables, the real temp directory — the things most easily missed by macOS-minded tools are foundation-level here:
+- **Where it sits**: the ZCode PreToolUse hook — one check before every Bash / Write / Edit / ApplyPatch call.
+- **What it stops**: catastrophic commands, writes outside the writable roots, irreversible operations (including destructive Git inside the project).
+- **How it stops them**: it emits `ask` and shows a confirmation. Never `allow`, never `deny`. Approve once, pass once.
+- **What it lets through**: routine in-project work — `rm -rf node_modules`, `mv`, `chmod`, `git status` — silently.
+- **What it is not**: not a sandbox, not protection against deliberate circumvention; with the decision model off, it sends nothing over the network.
 
-| Scenario | zcode-fence behavior |
+## What it guards against
+
+| Category | Representative commands (ask on match) |
 | --- | --- |
-| `rm -rf C:/Users` / `echo x > C:/Users/x/pwn.txt` (drive-letter paths, either slash style) | ask |
-| `echo x > "C:/Users/…/f"` (quoted redirect target) | quotes stripped, then judged → ask |
-| Git Bash / MSYS paths `/c/Users/...`, `echo x > /tmp/f` | normalized to `C:\Users\...`; `/tmp` maps to `%TEMP%` (temp writes pass) |
-| Variable paths `%USERPROFILE%` / `$HOME` / `%TEMP%` | expanded before judgment |
-| `del /s /q C:\Users\x`, `format D:`, `Remove-Item -Recurse C:\`, `reg delete` on root hives, `cipher /w:`, etc. | built-in rules → ask |
-| Compound commands `a && b & c\nd` (incl. single `&`, newlines) | fully split and judged per segment — later segments cannot escape |
-| Wrapper-hidden commands: `env -i rm -rf /`, `sudo -u root rm -rf /`, `nice -n 10 …`, `timeout 10 …`, `stdbuf -o0 …`, `bash -lc '…'` | option chains and combined short switches are peeled, then judged → ask |
-| `find / -delete`, `find / -exec rm -rf {} +`, `xargs rm -rf`, `sed -i … /etc/passwd`, `awk 'BEGIN{system(…)}'`, interpreter shell payloads | ask |
-| `curl … \| bash`, `bash <(curl …)`, `eval "$(curl …)"` | ask (remote code execution) |
-| Irreversible git: `git push --force`, `git reset --hard`, `git clean -fdx`, `git branch -D` | ask (even inside the project) |
-| System persistence: `crontab -r`, `systemctl enable`, `reg add`, `schtasks /create`, disabling the firewall | ask |
-| `rm -rf node_modules`, `mv src/a.ts src/b.ts`, in-project `chmod +x`, `git status` | pass (zero-false-positive philosophy) |
-| Runtime | pure Node (ZCode is an Electron app; node is always present), zero deps, works on a default Windows setup |
+| Catastrophic deletion | `rm -rf /`, `rm -rf ~`, `del /s /q C:\Users` |
+| Disk and system damage | `format D:`, `dd of=/dev/sda`, `mkfs`, `diskpart`, `Remove-Item C:\`, `reg delete` on root hives, `vssadmin delete shadows` |
+| Power and boot | `shutdown`, `reboot`, `systemctl poweroff`, `bcdedit` boot writes |
+| Out-of-bounds writes | `echo x > C:/Users/…/f`, `cp` / `mv` / `tar` / `curl -o` targeting outside the project, Write/Edit to the desktop, home or system directories |
+| Irreversible Git | `push --force`, `reset --hard`, `clean -fdx`, `branch -D`, `stash drop/clear`, change-discarding `checkout` / `restore` |
+| Remote code execution | `curl … \| bash`, `bash <(curl …)`, `eval "$(curl …)"` |
+| System persistence | `crontab -r`, `systemctl enable`, `reg add`, `schtasks /create`, `launchctl load/unload`, disabling the firewall |
+| Hidden commands | wrappers such as `env` / `sudo` / `nice` / `timeout`, `bash -lc`, `find -delete` / `-exec`, `xargs rm`, `sed -i`, inline scripts via `node -e` / `python -c` / `php -r` / `awk system()` / `osascript` |
 
-## What it does / does not do
+These never trigger a false positive: in-project `rm -rf node_modules`, `mv src/a.ts src/b.ts`, `chmod +x`, `git status`, and writes to the project root, the temp directory or the ZCode memory directory.
 
-Two independent deterministic layers, plus an optional decision-model review layer that is off by default:
+> This is not the full list. Every rule lives in [`guard.js`](plugins/zcode-fence/scripts/guard.js) as readable tables, with acceptance cases alongside. The README only shows the shapes that hurt most.
 
-1. **Danger gate** (`enable_danger_gate`): token-level exact combination matching, catastrophic-only — `rm -rf /`, `rm -rf ~`, `del /s /q C:\Users\x`, `format D:`, `dd of=/dev/sda`, `mkfs`, `diskutil eraseDisk`, fork bombs, `--no-preserve-root`, `chmod -R` on root/home, PowerShell `Remove-Item` on drive roots/home, `reg delete` on root hives, `cipher /w:`, `vssadmin delete shadows`, power commands (`shutdown`/`reboot`, `systemctl poweroff`), `bcdedit` writes, `diskpart`, etc. It also sees through payloads hidden inside `trap`/`eval`/`$()`/backticks or behind control-flow keywords such as `then`/`do`, and through interpreter `-e`/`-c` payloads (`node -e`, `python -c`) whenever a write API and an absolute-path literal co-occur (e.g. `node -e "…rmSync('C:/Windows'…)"`). v1.4.0 adds: wrapper option chains and combined short switches; `find -delete`/`-exec` judged by search root; dynamic `xargs` deletion targets; `sed -i` file operands; shell payloads from `awk system()`, `php -r`, `deno eval`, `bun -e` and `osascript`; `curl | bash` / `bash <(curl)` / `eval "$(curl)"` remote execution; `mount`/`umount`/`fdisk`/`parted` changes; irreversible git operations (force/delete/mirror push, `branch -D`, `reset --hard`, `clean -fdx`, change-discarding checkout/restore, `stash clear/drop`, etc.); and system persistence (crontab, iptables flush, firewall off, `reg add/delete`, `sc delete`, `systemctl enable/disable/mask/unmask`, `launchctl load/unload/bootstrap/bootout`, `schtasks /create|/delete|/change`). Custom regex rules supported.
-2. **Project fence** (`enable_fence`): file writes are limited to **writable roots** = project root (host-injected `ZCODE_PROJECT_DIR`) + the **real temp dir of the current platform** (`TEMP`/`TMP` on Windows; `TMPDIR` with `/tmp` kept on Unix) + the ZCode project memory directory (`~/.zcode/cli/memories`, written frequently by the host memory feature, allowed by default) + user-configured extra roots. Bash commands are judged heuristically (redirect targets, destination positions of cp/mv/tar/curl/tee..., every path operand of `chmod`/`chown`, both source and destination of `mv`, `sed -i` file operands, the deletion root of `find`, path literals co-occurring with write APIs inside interpreter payloads); `cd`/`pushd`/`popd` inside a command update the current directory for later segments, and relative write targets are resolved against it before comparing with the writable roots (project, temp, memory, extra roots); file tools (Write/Edit/ApplyPatch) get exact judgment (realpath with per-segment ancestor walk against symlink smuggling).
+## Windows is the foundation, not an afterthought
 
-**Session-root locking** (`lock_session_root`): the host-injected project root actually tracks the Bash current directory — once the agent `cd`s into a subdirectory, every subsequent call (Write/Edit included) drifts along, and `cd`-ing out of the project disables the fence entirely. With locking on, each session is judged against the **first root it saw** (≈ the workspace the session opened in): cd-ing into a subdirectory no longer flags writes to the real project root, and writes after cd-ing out stay fenced. State lives in a single `session-roots.log` in the plugin data directory (one line per session, 30-day expiry, 200-entry cap).
+Drive-letter paths (either slash style), Git Bash / MSYS paths (`/c/Users/...`), Windows environment variables (`%USERPROFILE%`, `%TEMP%`, `$HOME`), quoted redirect targets, the real temp directory — details that Unix-minded tools miss are normalized here before any judgment. On Windows, `/tmp` maps to the real `%TEMP%`, so temp writes do not raise false alarms.
 
-**Optional decision-model review layer** (`enable_decision_model`, off by default): only when both deterministic layers stay silent, the tool name, command or file path, and the project root are sent to the configured decision model, which is asked one question — should the user confirm? — plus an effect category (read-only, project write, git history, data deletion, system change, external side effect, data exfiltration). The model can only produce ask or silence; confirmation fires when the probability reaches the threshold (default 0.6). Timeouts (default 3500 ms, capped at 4000 ms), network errors, invalid responses or a missing endpoint fail open without changing the deterministic verdict, and the outcome is written to the decision log. Before sending, API keys/tokens/passwords/Authorization headers/private-key blocks/long secrets are redacted; only the tool name, command/path and project root are sent — never file contents, conversation history or session memory. Endpoint, model, API key, threshold, timeout, headers, proxy and prompt are all configurable; the source hardcodes no vendor endpoint.
+## How it works: two deterministic layers plus one optional layer
 
-**Zero-false-positive philosophy**: routine in-project work (`rm -rf node_modules`, `mv src/a.ts src/b.ts`, `chmod +x src/script.sh`, ...) passes untouched; the plugin only cares about "catastrophe", "out-of-bounds" and "irreversible loss". Git is the deliberate exception: operations that can lose uncommitted changes, untracked files, remote branches/tags or history ask even inside the project.
-
-**Non-goals (honest disclosure)**: this is not an OS-level sandbox. It inspects command text before execution; the following evade it by nature (it protects against accidents, not deliberate circumvention):
-
-- encoded payloads (`powershell -EncodedCommand`), script file contents (`powershell -File x.ps1`, `node x.js`), writes whose payload carries no path literal (concatenation like `process.env.HOME + '/x'`, or a command assembled from variables and passed to `child_process` indirectly);
-- sensitive-file reads/exfiltration (SSH private keys, `.env`, cloud credentials);
-- network access (ZCode's plugin API cannot control it).
-
-Relative out-of-bounds writes are not in this list: in-command cwd tracking judges `cd /c/Users/x && touch y`; relative writes after cd-ing into the temp, memory or project directory still pass through the writable-root whitelist.
-
-## ask-only: only tighten, never loosen (the key design decision)
-
-A hook's `allow` only skips the host's routine confirmation — it can only make things looser, never safer. So this plugin **never emits `allow`** (and never `deny`): on violation it emits `ask`; otherwise no output and exit 0, handing control back to the host's own permission mode. `ask` takes precedence over the host mode — even under full access a confirmation dialog appears. The confirmation box is the elevation channel: approve once, pass once.
-
-| Host mode | Normal in-project ops | Dangerous cmd / out-of-bounds write | Net effect |
+| Layer | Switch | Looks at | On match |
 | --- | --- | --- | --- |
-| Full access (main scenario) | silence = runs as usual | confirmation | full fence |
-| Auto edit | silence = host default | confirmation (Bash already asks) | semantics unchanged, free out-of-bounds file-write protection |
-| Confirm before changes | silence = host still asks each step | confirmation (overlaps host prompt) | equivalent to not installed |
+| Danger gate | `enable_danger_gate` | Whether the command is catastrophic, irreversible or system-level | ask |
+| Project fence | `enable_fence` | Whether the write target is inside the writable roots | ask |
+| Decision model (optional) | `enable_decision_model`, off by default | Semantic risk when both layers stay silent | ask or silence |
+
+The two deterministic layers are independent. Turn the danger gate off and `rm -rf /` is still caught by the fence as an out-of-bounds write.
+
+### Danger gate
+
+Catastrophic, irreversible and system-level changes only; routine in-project deletions pass. Before judging, it peels off:
+
+- **Wrappers**: `env`, `sudo`, `nice`, `timeout`, `stdbuf`, `nohup`, `time`, `command`, `exec`, `strace`, `wsl`, skipping option chains and combined short switches (e.g. `bash -lc`);
+- **Shell and control flow**: `bash -c`, `powershell -Command`, `trap`, `eval`, `$()`, backticks, commands behind `then` / `do`;
+- **Inline interpreter scripts**: `node -e`, `python -c`, `php -r`, `deno eval`, `bun -e`, `awk system()`, `osascript` — blocked when a write API and an absolute-path literal co-occur.
+
+Add your own rules with `custom_rules` (semicolon-separated JS regexes).
+
+### Project fence
+
+Writes are limited to four writable roots:
+
+1. The project root (host-injected `ZCODE_PROJECT_DIR`);
+2. The current platform's real temp directory (`TEMP` / `TMP` on Windows; `TMPDIR` with `/tmp` kept on Unix);
+3. The ZCode project memory directory (`~/.zcode/cli/memories`);
+4. Extra directories configured in `extra_writable_roots`.
+
+Bash commands are judged heuristically by write targets: redirect targets, destinations of `cp` / `mv` / `tar` / `curl -o` / `tee`, every path operand of `chmod` / `chown`, both source and destination of `mv`, files touched by `sed -i`, the deletion root of `find`. `cd` / `pushd` / `popd` inside a command update the current directory for later segments, and relative paths are resolved against it before comparison. Write / Edit / ApplyPatch get exact judgment: realpath plus a per-ancestor walk to stop symlink smuggling.
+
+### Session-root locking (`lock_session_root`)
+
+The host-injected project root follows the Bash current directory: once the agent `cd`s into a subdirectory, every later call (Write/Edit included) drifts with it, and `cd`-ing out of the project disables the fence entirely. With locking on, each session is judged against the **first root it saw** — roughly the workspace the session opened in. State lives in `session-roots.log` in the plugin data directory (one line per session, 30-day expiry, 200-entry cap).
+
+### Optional decision-model review layer (off by default)
+
+Rules see shape, not intent. When enabled, only after both deterministic layers stay silent are the tool name, command or path, and project root sent to the configured model, with one question: should the user confirm this? The model can only answer ask or silence; confirmation appears when the probability reaches the threshold (default 0.6).
+
+A missing endpoint, a timeout (default 3500 ms, capped at 4000 ms), a network error or an invalid response all fail open — the deterministic verdict stands. Secrets (API keys, tokens, passwords, Authorization headers, private-key blocks) are redacted before sending; file contents, conversation history and session memory are never sent. Endpoint, model, key, threshold, timeout, headers, proxy and prompt are all configurable, and the source hardcodes no vendor address.
+
+## ask-only: it only tightens, never loosens
+
+A hook's `allow` only skips the host's routine confirmation — it can make things looser, never safer. So this plugin **never emits `allow`** and never uses `deny`: on a violation it emits `ask`; otherwise no output and exit 0, handing control back to the host's own permission mode. `ask` takes precedence over the host mode, so a confirmation appears even under full access. The dialog is the elevation channel.
+
+| Host mode | Normal in-project work | Dangerous command / out-of-bounds write | Net effect |
+| --- | --- | --- | --- |
+| Full access (main scenario) | silence, runs as usual | confirmation | full fence |
+| Auto edit | silence, host default | confirmation (Bash already asks) | semantics unchanged, free out-of-bounds protection |
+| Confirm before changes | silence, host still asks each step | confirmation (overlaps host) | equivalent to not installed |
 | Plan mode | unchanged | unchanged | unchanged |
 
 ## Installation
 
-**Option 1: local directory marketplace (development / personal use)**
+**Option 1: GitHub marketplace**
 
-1. ZCode → Plugins → Add marketplace → select this repo root (the repo root itself is the local marketplace via `marketplace.json`);
-2. Install `zcode-fence` from that marketplace.
+1. ZCode → Plugins → Add marketplace → enter `https://github.com/Momenttttt/zcode-fence`;
+2. Install `zcode-fence`.
 
-**Option 2: GitHub marketplace (once the repo is pushed to GitHub)**
+**Option 2: local directory marketplace (development or personal use)**
 
-1. ZCode → Plugins → Add marketplace → enter the repo URL `https://github.com/Momenttttt/zcode-fence`;
-2. Install `zcode-fence` from that marketplace.
+1. ZCode → Plugins → Add marketplace → select this repo root (its `marketplace.json` is the local marketplace);
+2. Install `zcode-fence`.
 
-After either method, **start a new task** (hook config is snapshotted at task start; installs and config changes only take effect in new tasks), then ask the agent to run `echo x > C:/Users/<you>/Desktop/fence-test.txt` — a confirmation dialog means it works.
+**Start a new task** afterwards: hook configuration is snapshotted at task start, so installs and enable/disable changes only apply to new tasks. Then ask the agent to run:
+
+```bash
+echo x > C:/Users/<you>/Desktop/fence-test.txt
+```
+
+A confirmation dialog means the fence is live.
 
 ## Configuration
 
-Configured in the ZCode plugin settings UI, persisted under `plugins.options["zcode-fence@<marketplace>"]` in `~/.zcode/cli/config.json`, **re-read on every tool call** (takes effect in new tasks after editing). The settings UI is a single-line input that strips newlines → all list-type values are semicolon-separated; regex segments must not contain semicolons.
+Edit in the plugin settings UI; values persist under `plugins.options["zcode-fence@<marketplace>"]` in `~/.zcode/cli/config.json`. **Every tool call re-reads the config, so changes apply immediately**; only installs and enable/disable need a new task. The settings UI is a single-line input that strips newlines, so list values are semicolon-separated and regexes must not contain semicolons.
+
+**Basics**
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enable_danger_gate` | boolean | `true` | Danger gate switch |
 | `enable_fence` | boolean | `true` | Project fence switch |
-| `lock_session_root` | boolean | `true` | Session-root locking: judge against each session's first-seen root and ignore cd drift — no false positives after cd-ing into subdirectories, no fence bypass after cd-ing out. State in session-roots.log |
-| `custom_rules` | string | `""` | Custom danger rules: semicolon-separated JS regexes (case-sensitive), matched against the whole command text; invalid segments are skipped |
-| `extra_writable_roots` | string | `""` | Extra writable roots: semicolon-separated, supports `~`, `$VAR`, `%VAR%`. Add the other folders of multi-folder projects here (the host provides no folder list, so they cannot be inferred) |
+| `lock_session_root` | boolean | `true` | Session-root locking: judge against each session's first-seen root and ignore cd drift |
+| `custom_rules` | string | `""` | Custom danger rules: semicolon-separated JS regexes (case-sensitive) matched against the whole command; invalid segments are skipped |
+| `extra_writable_roots` | string | `""` | Extra writable roots: semicolon-separated, supports `~`, `$VAR`, `%VAR%`. Add the other folders of multi-folder projects |
 | `enable_log` | boolean | `true` | Decision log switch |
-| `enable_decision_model` | boolean | `false` | Decision-model review switch (off by default; no network requests while off) |
+
+**Decision model**
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enable_decision_model` | boolean | `false` | Review layer switch; no network requests while off |
 | `decision_model_endpoint` | string | `""` | Full POST endpoint; must be https, or http on localhost/private networks |
 | `decision_model_model` | string | `""` | `model` field in the request body; omitted when empty |
 | `decision_model_api_key` | string | `""` | Bearer key; `ZCODE_FENCE_DECISION_MODEL_API_KEY` takes precedence |
 | `decision_model_threshold` | string | `"0.6"` | Confirmation probability threshold, 0–1 |
 | `decision_model_timeout_ms` | string | `"3500"` | Timeout in ms, capped at 4000 (hook total is 5000) |
 | `decision_model_headers` | string | `""` | Extra headers, semicolon-separated `Name: Value` |
-| `decision_model_proxy` | string | `""` | `http://` proxy; fall back to environment proxies, NO_PROXY/localhost bypass |
+| `decision_model_proxy` | string | `""` | `http://` proxy; falls back to environment proxies, NO_PROXY and localhost bypass |
 | `decision_model_prompt` | string | `""` | Optional override for the confirmation prompt |
 
-## CLI self-test & decision log
+## Self-test and logs
 
-Print verdicts without ZCode. stdout is byte-identical to hook output (the ask JSON, or empty when passing — safe for scripts to consume), while stderr gets a one-line human-readable summary (e.g. `decision=silent`) so you can eyeball the verdict while debugging:
+You can print verdicts without ZCode. stdout is byte-identical to hook output (the ask JSON, or empty when passing), while stderr gets a human-readable summary:
 
 ```bash
 export ZCODE_PROJECT_DIR="$PWD"
@@ -109,29 +151,32 @@ node plugins/zcode-fence/scripts/guard.js --eval-write 'C:\Users\x\Desktop\a.txt
 node plugins/zcode-fence/scripts/guard.js --help
 ```
 
-The decision log (on by default) writes one JSONL line per ask/silent/error to `~/.zcode/cli/plugins/data/zcode-fence@<marketplace>/decisions.log` (auto-rotates at 5MB) for after-the-fact auditing ("why wasn't that blocked?"). Invalid stdin or internal errors fail open (exit 0, no output) and are logged.
+The decision log (on by default) writes one JSONL line per ask/silent/error to `~/.zcode/cli/plugins/data/zcode-fence@<marketplace>/decisions.log`, rotating at 5 MB — useful for answering "why wasn't that blocked?" after the fact. Invalid stdin or internal errors fail open (exit 0, no output) and are still logged.
 
-See [SKILL.md](plugins/zcode-fence/skills/zcode-fence/SKILL.md) for how the agent should respond to `[zcode-fence: ...]` markers: switch to an in-project/temp path or request user approval; never retry verbatim, never try to bypass.
+See [SKILL.md](plugins/zcode-fence/skills/zcode-fence/SKILL.md) for how the agent should respond to `[zcode-fence: ...]` markers: switch to an in-project or temp path, or ask the user to approve; never retry verbatim, never try to bypass.
 
-## Security statement
+## Limitations (honest disclosure)
 
-- No network activity and no data collection by default; all deterministic decisions are local and auditable (decision log).
-- Only when `enable_decision_model` is explicitly enabled are redacted tool-call details (tool name, command/path, project root) sent to the configured endpoint; file contents, conversation history and session memory are never sent.
-- All rules are built-in and readable (`plugins/zcode-fence/scripts/guard.js`); no remote rule delivery.
+This is not an OS-level sandbox. It looks at command text before execution; it protects against accidents, not deliberate circumvention:
 
-## Development & testing
+- Encoded payloads (`powershell -EncodedCommand`) and script file contents (`powershell -File`, `node x.js`);
+- Writes whose payload carries no path literal (string concatenation, or a command assembled and passed to `child_process`);
+- Sensitive-file reads and exfiltration (SSH private keys, `.env`, cloud credentials);
+- Network access (ZCode's plugin API cannot control it).
+
+Relative out-of-bounds writes are not in this list: in-command cwd tracking catches `cd /c/Users/x && touch y`, and relative writes after cd-ing into the temp, memory or project directory still go through the writable-root whitelist.
+
+## Development and testing
 
 ```bash
 npm test   # node tests/unit.js && node tests/run.js && node tests/decision-model.js
 ```
 
-- `tests/unit.js`: unit tests for normalizePath / splitting / token extraction / danger targets / config;
-- `tests/decision-model.js`: a local mock HTTP server covers ask/silent/threshold/timeout/HTTP errors/invalid JSON/missing endpoint/redaction, with no external network access;
-- `tests/run.js`: acceptance cases (`tests/cases.json`) all exercise the real entry points (`--eval` / stdin), with global invariants: **no case may ever produce allow/deny output** (ask-only is a project-level decision), ask output must exactly match the host schema, marketplace.json/plugin.json versions must stay in sync,
-DEFAULT_CONFIG keys must match the manifest userConfig;
-- CI: GitHub Actions tri-platform matrix (windows/ubuntu/macos + a node16 compatibility job).
+- `tests/unit.js`: pure-function tests for path normalization, command splitting, token extraction, danger targets and config loading;
+- `tests/run.js`: acceptance cases through the real entry points (`--eval` / stdin), plus global invariants — no case may output allow/deny, ask must exactly match the host schema, all three version fields agree, DEFAULT_CONFIG keys match the manifest userConfig;
+- `tests/decision-model.js`: a local mock HTTP server covers the decision model's ask/silent/threshold/timeout/HTTP errors/invalid JSON/missing endpoint/redaction, with no external network access.
 
-Release reminder: bump `version` in `marketplace.json`, `plugins/zcode-fence/.zcode-plugin/plugin.json` and its Claude-compatible copy `plugins/zcode-fence/.claude-plugin/plugin.json` together (enforced by a test).
+CI runs a Windows / Ubuntu / macOS matrix plus a Node 16 compatibility job. When releasing, bump `version` in `marketplace.json`, `.zcode-plugin/plugin.json` and `.claude-plugin/plugin.json` together (enforced by a test).
 
 ## License
 
