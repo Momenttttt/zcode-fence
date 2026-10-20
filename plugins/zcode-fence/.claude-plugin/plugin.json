@@ -69,7 +69,7 @@
       "type": "string",
       "default": "",
       "title": "决策模型端点",
-      "description": "完整 POST 地址（System One 风格 questions 协议）。必须是 https；本机或私网地址可用 http。留空时审核层不发请求并 fail-open。"
+      "description": "完整 POST 地址（questions 问答协议）。必须是 https；本机或私网地址可用 http。留空时审核层不发请求并 fail-open。"
     },
     "decision_model_model": {
       "type": "string",

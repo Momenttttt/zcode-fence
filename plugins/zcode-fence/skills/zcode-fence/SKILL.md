@@ -25,7 +25,9 @@ There are five marker categories:
   (`~/.zcode/cli/memories`), and any user-configured extra roots. This includes
   relative targets resolved against the command's current directory (`cd /path && …`),
   `chmod`/`chown` operands, both sides of `mv`, `sed -i` files, `find` deletion roots,
-  and interpreter write payloads.
+  and interpreter write payloads. Relative targets are resolved against the command's cwd
+  and must stay inside the project/memory/extra roots — the temp directory only accepts
+  absolute paths, so `cd /tmp && touch x` asks; use an absolute temp path instead.
 - `[zcode-fence: 路径无法解析]` — the target contains an undefined variable (e.g.
   `%NOPE%\x`), so its owner cannot be determined.
 - `[zcode-fence: 自定义规则]` — a user-configured regex matched the command text.

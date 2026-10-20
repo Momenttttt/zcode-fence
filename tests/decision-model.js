@@ -361,6 +361,20 @@ function caseDir() {
     assert.strictEqual(seen['x-other'], 'two');
   });
 
+  await t('代理/NO_PROXY 解析（配置覆盖环境、本机直连）', async () => {
+    const g = require(GUARD);
+    const ep = (u) => g.parseModelEndpoint(u);
+    const target = ep('https://api.example.com/v1/systemone');
+    assert.strictEqual(g.resolveProxy(target, { decision_model_proxy: '' },
+      { HTTPS_PROXY: 'http://proxy:3128' }).url.host, 'proxy:3128');
+    assert.strictEqual(g.resolveProxy(target, { decision_model_proxy: '' },
+      { HTTPS_PROXY: 'http://proxy:3128', NO_PROXY: 'api.example.com' }).url, null);
+    assert.strictEqual(g.resolveProxy(target, { decision_model_proxy: 'http://cfg:8080' },
+      { HTTPS_PROXY: 'http://env:1' }).url.host, 'cfg:8080');
+    assert.strictEqual(g.resolveProxy(ep('http://127.0.0.1:9/v1'), { decision_model_proxy: '' },
+      { HTTPS_PROXY: 'http://proxy:1' }).url, null);
+  });
+
   server.close();
   console.log('');
   console.log('决策模型测试：' + passed + ' 通过，' + failed + ' 失败');

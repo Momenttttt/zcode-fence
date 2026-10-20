@@ -442,57 +442,41 @@ function extractRedirects(seg) {
  * ================================================================ */
 
 // 包装器选项表：跳过选项链（含带值选项）后继续 dispatch 内层命令。
-// value 为需要独立值的选项；attached 为可附着写法（-o0 / -o 0 / --output=0）的选项。
-// 未列出的开关按无值跳过 —— 宁可多剥一层，也不能让选项链把内层命令藏起来。
+// value 为需要独立值的选项；attached 为可附着写法（-o0 / -o 0）的选项；
+// 其余开关一律按无值跳过 —— 宁可多剥一层，也不能让选项链把内层命令藏起来。
 const WRAPPER_SPECS = {
   sudo: {
     value: ['-u', '--user', '-g', '--group', '-p', '--prompt', '-C', '--close-from', '-h', '--host',
       '-r', '--role', '-t', '--type', '-U', '--other-user', '-T', '--command-timeout', '-D', '--chdir'],
-    flag: ['-n', '-E', '-H', '-k', '-K', '-S', '-b', '-A', '-B', '-P', '-e', '--preserve-env',
-      '--reset-timestamp', '--non-interactive', '--stdin', '--set-home', '--background',
-      '--askpass', '--bell', '--help', '--version'],
   },
   env: {
     value: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string', '--block-signal',
       '--default-signal', '--ignore-signal'],
-    flag: ['-i', '-0', '--ignore-environment', '--null', '-v', '--debug', '--help', '--version'],
   },
   nice: {
     value: ['-n', '--adjustment'],
-    flag: ['--help', '--version'],
   },
   timeout: {
     value: ['-s', '--signal', '-k', '--kill-after'],
-    flag: ['--preserve-status', '--foreground', '-v', '--verbose', '--help', '--version'],
     positional: 1, // 时长参数（timeout 10 <cmd>）
   },
   stdbuf: {
-    value: ['-i', '-o', '-e', '--input', '--output', '--error'],
-    flag: ['--help', '--version'],
+    value: ['--input', '--output', '--error'],
     attached: ['-i', '-o', '-e'],
   },
-  nohup: {
-    flag: ['--help', '--version'],
-  },
+  nohup: {},
   time: {
     value: ['-o', '--output', '-f', '--format'],
-    flag: ['-p', '-v', '-a', '--append', '--help', '--version'],
   },
-  command: {
-    flag: ['-p', '-v', '-V', '--help'],
-  },
+  command: {},
   exec: {
     value: ['-a'],
-    flag: ['-c', '-l', '--help', '--version'],
   },
   strace: {
     value: ['-o', '-e', '-p', '-s', '-u', '-E', '-I', '-b', '-a', '--output', '--trace', '--expr'],
-    flag: ['-f', '-F', '-c', '-q', '-v', '-x', '-y', '-t', '-tt', '-T', '-r', '-k', '-n',
-      '--help', '--version'],
   },
   wsl: {
     value: ['-d', '--distribution', '-u', '--user', '-e', '--exec', '--cd'],
-    flag: ['-l', '--list', '--install', '--status', '--version', '--help', '--shutdown', '-t', '--terminate'],
   },
 };
 const PREFIX_CMDS = new Set(['valgrind', 'busybox']);
@@ -578,10 +562,15 @@ function resolveAgainstCwd(info, cwd, ctx) {
   return null;
 }
 
+function resolveTargetInfo(raw, ctx, cwd) {
+  const base = normalizePath(raw, ctx.npBash);
+  const relative = base.kind === 'relative';
+  const info = relative ? (cwd ? resolveAgainstCwd(base, cwd, ctx) : null) : base;
+  return { info, relative };
+}
+
 function resolveTarget(raw, ctx, cwd) {
-  const info = normalizePath(raw, ctx.npBash);
-  if (info.kind === 'relative') return cwd ? resolveAgainstCwd(info, cwd, ctx) : null;
-  return info;
+  return resolveTargetInfo(raw, ctx, cwd).info;
 }
 
 // 命令操作数（跳过开关与 Windows /x 单字母开关）
@@ -648,9 +637,10 @@ function gitDisposition(args) {
 
   if (cmd === 'push') {
     if (dryRun) return null;
-    if (rest.some((t) => t === '--force' || t === '-f' || t === '--force-with-lease' ||
+    if (rest.some((t) => t === '--force' || t === '--force-with-lease' ||
         t.indexOf('--force-with-lease=') === 0 || t === '--force-if-includes' ||
-        t === '--delete' || t === '-d' || t === '--mirror' || t.charAt(0) === '+')) {
+        t === '--delete' || t === '--mirror' || t.charAt(0) === '+') ||
+        anyShortWith(rest, 'f') || anyShortWith(rest, 'd')) {
       return { label: '强制/删除/镜像推送', rule: 'DG-GIT-PUSH-FORCE' };
     }
     return null;
@@ -677,7 +667,8 @@ function gitDisposition(args) {
     return null;
   }
   if (cmd === 'checkout') {
-    if (anyFlag(rest, ['--force']) || anyShortWith(rest, 'f') || anyShortWith(rest, 'B') || rest.indexOf('--') >= 0) {
+    if (anyFlag(rest, ['--force']) || anyShortWith(rest, 'f') || anyShortWith(rest, 'B') ||
+        rest.indexOf('--') >= 0 || rest.indexOf('.') >= 0) {
       return { label: '丢弃工作区改动', rule: 'DG-GIT-CHECKOUT-DISCARD' };
     }
     return null;
@@ -723,7 +714,7 @@ function gitJudge(args, ctx, add) {
 
 /* ---- find：-delete / -exec 删除按查找根判定 ---- */
 
-const FIND_EXEC_DELETE = new Set(['rm', 'del', 'rd', 'rmdir', 'erase', 'shred', 'unlink', 'remove-item', 'ri']);
+const DELETE_CMDS = new Set(['rm', 'del', 'rd', 'rmdir', 'erase', 'shred', 'unlink', 'remove-item', 'ri']);
 const FIND_EXPR_START = new Set(['!', '(', ')', ',']);
 
 function findParts(args) {
@@ -759,7 +750,7 @@ function findJudge(args, ctx, depth, add, cwd) {
   const execs = findExecCommands(parts.expr);
   const execDeletes = execs.filter((sub) => {
     const pc = parseCmd(sub);
-    return pc && FIND_EXEC_DELETE.has(pc.name);
+    return pc && DELETE_CMDS.has(pc.name);
   });
   if (hasDelete || execDeletes.length) {
     for (const root of parts.roots) {
@@ -784,7 +775,6 @@ function findJudge(args, ctx, depth, add, cwd) {
 const XARGS_VALUE_OPTS = new Set(['-I', '-n', '-P', '-L', '-l', '-s', '-E', '-e', '-d', '-a',
   '--delimiter', '--max-args', '--max-procs', '--max-lines', '--max-chars', '--arg-file',
   '--eof', '--replace', '--process-slot-var']);
-const DYNAMIC_DELETE = new Set(['rm', 'del', 'rd', 'rmdir', 'erase', 'shred', 'unlink', 'remove-item', 'ri']);
 
 function xargsCommandOf(args) {
   let i = 0;
@@ -843,13 +833,15 @@ function sedJudge(args, ctx, add, cwd) {
 function metaOperands(name, args) {
   const out = [];
   let ownerSkipped = false;
+  // --reference 形态不需要 owner 操作数，所有非选项参数都是目标文件
+  const hasReference = name !== 'chmod' && args.some((a) => a === '--reference' || a.indexOf('--reference=') === 0);
   for (let i = 0; i < args.length; i++) {
     const t = args[i];
     if (t === '--') { for (const f of args.slice(i + 1)) out.push(f); break; }
     if (t[0] === '-' && t.length > 1) continue;                      // 开关（含 --reference=）
     if (/^[0-7]{3,4}$/.test(t)) continue;                            // chmod 数字模式
     if (/^[ugoa]*[+-=][rwxXst]*$/.test(t)) continue;                 // chmod 符号模式
-    if (name === 'chown' || name === 'chgrp') {
+    if ((name === 'chown' || name === 'chgrp') && !hasReference) {
       if (!ownerSkipped) { ownerSkipped = true; continue; }          // 第一个操作数是 owner/group
     }
     out.push(t);
@@ -859,6 +851,83 @@ function metaOperands(name, args) {
 
 function gateReason(add, label, rule) {
   add('[' + PLUGIN_ID + ': 危险命令] ' + label + '（规则 ' + rule + '）');
+}
+
+const STORAGE_TOOLS = new Set(['mount', 'umount', 'unmount', 'fdisk', 'parted']);
+const PERSIST_TOOLS = new Set(['systemctl', 'crontab', 'iptables', 'ip6tables', 'netsh', 'sc', 'launchctl', 'schtasks']);
+
+// 系统存储/分区工具：列表/查询形态放行，其余变更 ask
+function storageJudge(name, args, add) {
+  if (name === 'mount') {
+    if (!args.length || args.some((a) => a === '-l' || a === '--list' || a === '--help' || a === '-h')) return;
+    gateReason(add, 'mount 挂载/重挂载文件系统', 'DG-MOUNT');
+    return;
+  }
+  if (name === 'umount' || name === 'unmount') {
+    if (!args.length || args.some((a) => a === '--help' || a === '-h')) return;
+    gateReason(add, 'umount 卸载文件系统', 'DG-UMOUNT');
+    return;
+  }
+  if (name === 'fdisk') {
+    if (args.some((a) => /^-[A-Za-z]*l/.test(a) || a === '--list' || a === '--help' || a === '-h')) return;
+    gateReason(add, 'fdisk 分区表操作', 'DG-FDISK');
+    return;
+  }
+  if (name === 'parted') {
+    if (!args.length || args.some((a) => a === 'print' || a === '-l' || a === '--list' ||
+        a === '--help' || a === '-h')) return;
+    gateReason(add, 'parted 分区表操作', 'DG-PARTED');
+  }
+}
+
+// 系统持久化：重启后仍生效的变更 ask；日常启停/查询放行
+function persistenceJudge(name, args, add) {
+  const rest = args.join(' ');
+  if (name === 'systemctl') {
+    const killer = args.find((a) => SYSTEMCTL_KILLERS.has(String(a).toLowerCase()));
+    if (killer) {
+      gateReason(add, 'systemctl 电源控制子命令 ' + killer, 'DG-SYSTEMCTL-POWER');
+      return;
+    }
+    const persist = args.find((a) => SYSTEMCTL_PERSIST.has(String(a).toLowerCase()));
+    if (persist) gateReason(add, 'systemctl ' + persist + ' 持久化服务状态', 'DG-SYSTEMCTL-PERSIST');
+    return;
+  }
+  if (name === 'crontab') {
+    if (args.some((a) => a === '-r' || a === '--remove')) {
+      gateReason(add, 'crontab -r 删除定时任务', 'DG-CRON-REMOVE');
+    }
+    return;
+  }
+  if (name === 'iptables' || name === 'ip6tables') {
+    if (args.some((a) => a === '-F' || a === '--flush')) {
+      gateReason(add, name + ' flush 清空防火墙规则', 'DG-IPTABLES-FLUSH');
+    }
+    return;
+  }
+  if (name === 'netsh') {
+    const low = args.map((a) => String(a).toLowerCase());
+    const firewall = low.some((a) => a === 'advfirewall' || a === 'firewall');
+    const changing = low.some((a) => a === 'set' || a === 'reset');
+    const disabling = low.some((a) => a === 'off' || a === 'disable' || a === 'disabled');
+    if (firewall && changing && disabling) {
+      gateReason(add, 'netsh 关闭防火墙', 'DG-NETSH-FIREWALL');
+    }
+    return;
+  }
+  if (name === 'sc') {
+    if (/^delete\b/i.test(rest)) gateReason(add, 'sc delete 删除服务', 'DG-SC-DELETE');
+    return;
+  }
+  if (name === 'launchctl') {
+    const sub = args.find((a) => LAUNCHCTL_PERSIST.has(String(a).toLowerCase()));
+    if (sub) gateReason(add, 'launchctl ' + sub + ' 持久化/变更服务', 'DG-LAUNCHCTL-PERSIST');
+    return;
+  }
+  if (name === 'schtasks') {
+    const hit = args.find((a) => /^\/(create|delete|change)$/i.test(a));
+    if (hit) gateReason(add, 'schtasks ' + hit + ' 修改计划任务', 'DG-SCHTASKS-PERSIST');
+  }
 }
 
 function gateSegment(seg, ctx, depth, add, cwd) {
@@ -963,50 +1032,8 @@ function gateSegment(seg, ctx, depth, add, cwd) {
     gateReason(add, name + ' 关机/重启命令', 'DG-POWEROFF');
     return;
   }
-  if (name === 'systemctl') {
-    const sub = args.find((a) => SYSTEMCTL_KILLERS.has(String(a).toLowerCase()));
-    if (sub) {
-      gateReason(add, 'systemctl 电源控制子命令 ' + sub, 'DG-SYSTEMCTL-POWER');
-      return;
-    }
-    const persist = args.find((a) => SYSTEMCTL_PERSIST.has(String(a).toLowerCase()));
-    if (persist) gateReason(add, 'systemctl ' + persist + ' 持久化服务状态', 'DG-SYSTEMCTL-PERSIST');
-    return;
-  }
-  if (name === 'crontab') {
-    if (args.some((a) => a === '-r' || a === '--remove')) {
-      gateReason(add, 'crontab -r 删除定时任务', 'DG-CRON-REMOVE');
-    }
-    return;
-  }
-  if (name === 'iptables' || name === 'ip6tables') {
-    if (args.some((a) => a === '-F' || a === '--flush')) {
-      gateReason(add, name + ' flush 清空防火墙规则', 'DG-IPTABLES-FLUSH');
-    }
-    return;
-  }
-  if (name === 'netsh') {
-    const low = args.map((a) => String(a).toLowerCase());
-    const firewall = low.some((a) => a === 'advfirewall' || a === 'firewall');
-    const changing = low.some((a) => a === 'set' || a === 'reset');
-    const disabling = low.some((a) => a === 'off' || a === 'disable' || a === 'disabled');
-    if (firewall && changing && disabling) {
-      gateReason(add, 'netsh 关闭防火墙', 'DG-NETSH-FIREWALL');
-    }
-    return;
-  }
-  if (name === 'sc') {
-    if (/^delete\b/i.test(rest)) gateReason(add, 'sc delete 删除服务', 'DG-SC-DELETE');
-    return;
-  }
-  if (name === 'launchctl') {
-    const sub = args.find((a) => LAUNCHCTL_PERSIST.has(String(a).toLowerCase()));
-    if (sub) gateReason(add, 'launchctl ' + sub + ' 持久化/变更服务', 'DG-LAUNCHCTL-PERSIST');
-    return;
-  }
-  if (name === 'schtasks') {
-    const hit = args.find((a) => /^\/(create|delete|change)$/i.test(a));
-    if (hit) gateReason(add, 'schtasks ' + hit + ' 修改计划任务', 'DG-SCHTASKS-PERSIST');
+  if (PERSIST_TOOLS.has(name)) {
+    persistenceJudge(name, args, add);
     return;
   }
   if (name === 'init' || name === 'telinit') {
@@ -1021,25 +1048,8 @@ function gateSegment(seg, ctx, depth, add, cwd) {
     gateReason(add, 'diskpart 磁盘分区工具', 'DG-DISKPART');
     return;
   }
-  if (name === 'mount') {
-    if (!args.length || args.some((a) => a === '-l' || a === '--list' || a === '--help' || a === '-h')) return;
-    gateReason(add, 'mount 挂载/重挂载文件系统', 'DG-MOUNT');
-    return;
-  }
-  if (name === 'umount' || name === 'unmount') {
-    if (!args.length || args.some((a) => a === '--help' || a === '-h')) return;
-    gateReason(add, 'umount 卸载文件系统', 'DG-UMOUNT');
-    return;
-  }
-  if (name === 'fdisk') {
-    if (args.some((a) => /^-[A-Za-z]*l/.test(a) || a === '--list' || a === '--help' || a === '-h')) return;
-    gateReason(add, 'fdisk 分区表操作', 'DG-FDISK');
-    return;
-  }
-  if (name === 'parted') {
-    if (!args.length || args.some((a) => a === 'print' || a === '-l' || a === '--list' ||
-        a === '--help' || a === '-h')) return;
-    gateReason(add, 'parted 分区表操作', 'DG-PARTED');
+  if (STORAGE_TOOLS.has(name)) {
+    storageJudge(name, args, add);
     return;
   }
   if (name === 'git') {
@@ -1053,7 +1063,7 @@ function gateSegment(seg, ctx, depth, add, cwd) {
   if (name === 'xargs') {
     const sub = xargsCommandOf(args);
     if (sub) {
-      if (DYNAMIC_DELETE.has(sub.name)) {
+      if (DELETE_CMDS.has(sub.name)) {
         gateReason(add, 'xargs 把动态输入交给删除命令 ' + sub.name + '，目标无法静态确认', 'DG-XARGS-DELETE');
       } else if (SHELLS.has(sub.name) || sub.name === 'cmd' || sub.name === 'powershell' ||
                  sub.name === 'pwsh' || sub.name === 'eval') {
@@ -1137,12 +1147,28 @@ const RE_RCE_EVAL = /\beval\s+["']?\$\(\s*(?:curl|wget|aria2c|fetch)\b/;
 function shellFromStdin(pc) {
   if (!pc) return false;
   if (SHELLS.has(pc.name)) {
-    if (!pc.args.length) return true;
-    const first = pc.args[0].toLowerCase();
-    return first === '-s' || first === '--stdin';
+    // 语法检查/帮助形态不执行 stdin；-c 形式执行参数而非 stdin；其余开关（-e/-x/--norc）
+    // 仍会从 stdin 读脚本，必须继续判定。显式 -s 或没有脚本操作数 → 读 stdin。
+    const args = pc.args;
+    const low = args.map((a) => String(a).toLowerCase());
+    if (low.some((a) => a === '-n' || a === '--noexec' || a === '--help' || a === '-h' ||
+        a === '--version' || a === '-v' || a === '-V')) return false;
+    if (low.some((a) => a === '-c' || /^-[A-Za-z]*c[A-Za-z]*$/.test(a))) return false;
+    if (low.some((a) => a === '-s' || a === '--stdin')) return true;
+    let script = null;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '-o' || a === '+o' || a === '-O' || a === '+O' || a === '--rcfile' || a === '--init-file') { i++; continue; }
+      if (a[0] !== '-') { script = a; break; }
+    }
+    return !script || script === '-' || script === '/dev/stdin';
   }
   if (STDIN_INTERPRETERS.has(pc.name)) {
-    return !pc.args.length || pc.args[0] === '-' || pc.args[0] === '/dev/stdin';
+    // 内联代码（-c/-e/-r/-m）或脚本文件不读 stdin；纯开关（-u/-B 等）仍读 stdin
+    const args = pc.args.map((a) => String(a).toLowerCase());
+    if (args.some((a) => a === '-c' || a === '-e' || a === '-r' || a === '-m' || a === '-p')) return false;
+    const script = pc.args.find((a) => a[0] !== '-');
+    return !script || script === '-' || script === '/dev/stdin';
   }
   return false;
 }
@@ -1450,23 +1476,23 @@ const DEST_FLAG = {
 };
 
 function judgeWriteTarget(rawTok, ctx, cmdLabel, cwd) {
-  let info = normalizePath(rawTok, ctx.npBash);
-  if (info.kind === 'empty') return null;
+  const resolved = resolveTargetInfo(rawTok, ctx, cwd);
+  const info = resolved.info;
+  if (!info || info.kind === 'empty') return null; // 相对路径且 cwd 未知 → fail-open
   // 未定义变量（如 Unix 上的 %USERPROFILE%）→ 无法判定归属，宁可多问一句
   if (info.kind === 'unresolved' || info.unresolved) {
     return '[' + PLUGIN_ID + ': 路径无法解析] ' + rawTok + ' 含未定义变量，无法判定归属，请改用明确路径';
   }
-  if (info.kind === 'relative') {
-    // 相对目标按命令内 cwd 解析；cwd 未知 → fail-open（与既有相对路径口径一致）
-    const resolved = resolveAgainstCwd(info, cwd, ctx);
-    if (!resolved) return null;
-    info = resolved;
-  }
   if (info.kind === 'null' || info.kind === 'relative') return null;
-  if (!ctx.roots || !ctx.roots.length) return null; // ZCODE_PROJECT_DIR 缺失 → 围栏降级
-  if (!isInsideRoots(info.norm, ctx.roots, ctx.platform)) {
+  // 相对目标按命令内目录解析后只在项目根/记忆目录/额外可写根内放行；临时目录需用绝对路径
+  // （cd /tmp && touch x 必须 ask，而直接写 /tmp/f 仍按临时目录白名单放行）
+  const roots = resolved.relative ? (ctx.nonTempRoots || ctx.roots) : ctx.roots;
+  if (!roots || !roots.length) return null; // ZCODE_PROJECT_DIR 缺失 → 围栏降级
+  if (!isInsideRoots(info.norm, roots, ctx.platform)) {
     // 披露当前项目根：会话工作区开错层级时（如开在子目录）用户可一眼诊断
-    return '[' + PLUGIN_ID + ': 越界写入] ' + cmdLabel + ' 的目标 ' + info.norm + ' 不在项目根 ' + ctx.projectDir + ' 等可写根内';
+    return '[' + PLUGIN_ID + ': 越界写入] ' + cmdLabel + ' 的目标 ' + info.norm + ' 不在项目根 ' +
+      ctx.projectDir + ' 等可写根内' +
+      (resolved.relative ? '（相对目标按命令内目录解析，临时目录请改用绝对路径）' : '');
   }
   return null;
 }
@@ -1518,24 +1544,25 @@ function fenceSegment(seg, ctx, depth, add, cwd) {
       if (payload) psJudge(payload, ctx, depth, add, cwd); // gate 关闭时围栏侧也兜底判一次
       return;
     }
-    if (name === 'find') {
-      findJudge(args, ctx, depth, add, cwd); // gate 关闭时围栏侧也兜底判根
-      return;
-    }
-    if (name === 'sed' || name === 'gsed') {
-      sedJudge(args, ctx, add, cwd);
-      return;
-    }
-    // 解释器内嵌脚本：写 API 与路径字面量共现才判（gate 关闭时围栏侧也兜底判一次）。
-    // 不提前 return：外层重定向目标（node -e "..." > 界外路径）照常落到尾部判定
-    const script = scriptPayloadOf(name, args);
-    if (script != null) {
-      interpreterJudge(name, script, ctx, depth, add, cwd);
+    if (name === 'find' || name === 'sed' || name === 'gsed') {
+      // gate 启用时 gateSegment 已调用（内部同时覆盖围栏）；仅在 gate 关闭时由围栏兜底。
+      // 不提前 return：外层重定向目标（find … > 界外路径）照常落到尾部判定。
+      if (!ctx.cfg.enable_danger_gate) {
+        if (name === 'find') findJudge(args, ctx, depth, add, cwd);
+        else sedJudge(args, ctx, add, cwd);
+      }
     } else {
-      const inner = unwrapWrapper(name, args);
-      if (inner != null) {
-        judgeCommand(inner, ctx, depth + 1, add, cwd);
-        return;
+      // 解释器内嵌脚本：写 API 与路径字面量共现才判（gate 关闭时围栏侧也兜底判一次）。
+      // 不提前 return：外层重定向目标（node -e "..." > 界外路径）照常落到尾部判定
+      const script = scriptPayloadOf(name, args);
+      if (script != null) {
+        interpreterJudge(name, script, ctx, depth, add, cwd);
+      } else {
+        const inner = unwrapWrapper(name, args);
+        if (inner != null) {
+          judgeCommand(inner, ctx, depth + 1, add, cwd);
+          return;
+        }
       }
     }
   }
@@ -1743,12 +1770,14 @@ function buildContext(env, opts) {
 
   const ctx = {
     cfg: loaded.cfg, cfgPath: loaded.cfgPath, notes: loaded.notes,
-    platform, env, projectDir, homeNorm, npFile, npBash, roots: null,
+    platform, env, projectDir, homeNorm, npFile, npBash, roots: null, nonTempRoots: null,
   };
 
   if (projectDir) {
-    // 可写根 = 项目根 + 当前平台真实临时目录 + ZCode 项目记忆目录 + 用户配置的额外可写根
+    // 可写根 = 项目根 + 当前平台真实临时目录 + ZCode 项目记忆目录 + 用户配置的额外可写根。
+    // nonTempRoots 供「相对写目标」使用：临时目录只接受绝对路径，cd 进临时目录后的相对写仍 ask。
     const roots = [projectDir];
+    const nonTempRoots = [projectDir];
     const temps = platform === 'win32'
       ? [env.TEMP, env.TMP, os.tmpdir()]     // Windows 读 TEMP/TMP（真实临时目录）
       : [env.TMPDIR, '/tmp', os.tmpdir()];   // Unix 用 TMPDIR，/tmp 保留
@@ -1756,14 +1785,17 @@ function buildContext(env, opts) {
     // 避免完全访问模式下反复弹确认。用正斜杠 join，兼容 HOME 为 MSYS 风格（/c/Users/x）的环境。
     const memRoot = [homeOf(env), '.zcode', 'cli', 'memories'].join('/');
     const extras = splitList(ctx.cfg.extra_writable_roots);
-    for (const t of temps.concat([memRoot], extras)) {
-      if (!t) continue;
+    const addRoot = (list, t) => {
+      if (!t) return;
       const i = normalizePath(t, npFile);
-      if (i.kind !== 'drive' && i.kind !== 'unix' && i.kind !== 'unc') continue;
+      if (i.kind !== 'drive' && i.kind !== 'unix' && i.kind !== 'unc') return;
       const r = realPathBest(i.norm, platform) || i.norm;
-      if (!roots.some((x) => isUnder(r, x, platform) || isUnder(x, r, platform))) roots.push(r);
-    }
+      if (!list.some((x) => isUnder(r, x, platform) || isUnder(x, r, platform))) list.push(r);
+    };
+    for (const t of temps) addRoot(roots, t);
+    for (const t of [memRoot].concat(extras)) { addRoot(roots, t); addRoot(nonTempRoots, t); }
     ctx.roots = roots;
+    ctx.nonTempRoots = nonTempRoots;
   }
   return ctx;
 }
@@ -2331,6 +2363,13 @@ module.exports = {
 };
 
 if (require.main === module) {
-  // fail-open：CLI 层的意外异常也不能以非零码结束或卡住 hook
-  main().catch(() => {});
+  // fail-open：CLI 层的意外异常也不能以非零码结束或卡住 hook，但异常仍要写决策日志
+  main().catch((e) => {
+    try {
+      writeLog({
+        source: 'cli', level: 'error', verdict: 'error',
+        note: 'CLI 异常: ' + ((e && e.stack) || e),
+      }, process.env, loadConfig(process.env).cfg.enable_log);
+    } catch (err) { /* 日志失败不影响 fail-open */ }
+  });
 }

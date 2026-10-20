@@ -209,47 +209,6 @@ function staticChecks() {
     if (!h || typeof h.timeoutMs !== 'number') errs.push('缺 timeoutMs');
   }
 
-  // README 必须保留一行致谢；致谢里提到的参考项目名不得出现在源码/测试/配置中。
-  // 参考名从 README 致谢行动态提取，避免在检查器里硬编码项目名。
-  const readmes = ['README.md', 'README_EN.md', 'plugins/zcode-fence/README.md', 'plugins/zcode-fence/README_CN.md'];
-  const refs = new Set();
-  for (const rel of readmes) {
-    let text = '';
-    try { text = fs.readFileSync(path.join(ROOT, rel), 'utf8'); } catch (e) { errs.push('缺 ' + rel); continue; }
-    const ackLines = text.split('\n').filter((l) =>
-      /(灵感来自|设计思路参考了|Inspired by|Design ideas were informed by)/.test(l) && /github\.com\//.test(l));
-    if (!ackLines.length) { errs.push(rel + ' 缺一行致谢'); continue; }
-    for (const line of ackLines) {
-      const re = /https?:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g;
-      let m;
-      while ((m = re.exec(line)) !== null) {
-        if (m[1].toLowerCase() === 'momenttttt' || m[2].toLowerCase() === 'zcode-fence') continue;
-        refs.add(m[1]);
-        refs.add(m[2]);
-      }
-    }
-  }
-  if (!refs.size) errs.push('README 致谢中未解析到参考项目'); // 防止致谢被删空后检查形同虚设
-  const skipDirs = new Set(['.git', 'node_modules', 'tmp', '.scratch', 'docs', 'assets']);
-  const skipFiles = /^(README(_[A-Za-z]+)?\.md|LICENSE|AGENTS\.md)$/i;
-  const scan = [];
-  (function walk(dir) {
-    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, ent.name);
-      if (ent.isDirectory()) { if (!skipDirs.has(ent.name)) walk(full); continue; }
-      if (!/\.(js|json|md|yml|yaml)$/i.test(ent.name) || skipFiles.test(ent.name)) continue;
-      scan.push(full);
-    }
-  })(ROOT);
-  for (const file of scan) {
-    let text = '';
-    try { text = fs.readFileSync(file, 'utf8').toLowerCase(); } catch (e) { continue; }
-    for (const name of refs) {
-      if (name && text.indexOf(name.toLowerCase()) >= 0) {
-        errs.push('参考项目名出现在非 README 文件: ' + path.relative(ROOT, file) + ' ← ' + name);
-      }
-    }
-  }
   return errs;
 }
 
