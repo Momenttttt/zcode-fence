@@ -13,7 +13,14 @@
   "homepage": "https://github.com/Momenttttt/zcode-fence",
   "repository": "https://github.com/Momenttttt/zcode-fence",
   "license": "MIT",
-  "keywords": ["security", "hooks", "windows", "fence", "guard", "workspace"],
+  "keywords": [
+    "security",
+    "hooks",
+    "windows",
+    "fence",
+    "guard",
+    "workspace"
+  ],
   "skills": "skills",
   "userConfig": {
     "enable_danger_gate": {
@@ -51,6 +58,60 @@
       "default": true,
       "title": "决策日志",
       "description": "每次判定（ask/silent/异常）写入插件数据目录 decisions.log，便于事后审计。"
+    },
+    "enable_decision_model": {
+      "type": "boolean",
+      "default": false,
+      "title": "决策模型审核层",
+      "description": "默认关闭。开启后仅在确定性两层都未命中时，把工具名、命令/路径和项目根发送到配置的决策模型端点，由模型判断是否需要用户确认；只产生 ask 或沉默，任何失败都放行（fail-open）。"
+    },
+    "decision_model_endpoint": {
+      "type": "string",
+      "default": "",
+      "title": "决策模型端点",
+      "description": "完整 POST 地址（System One 风格 questions 协议）。必须是 https；本机或私网地址可用 http。留空时审核层不发请求并 fail-open。"
+    },
+    "decision_model_model": {
+      "type": "string",
+      "default": "",
+      "title": "决策模型名称",
+      "description": "请求体的 model 字段；留空则不发送该字段。"
+    },
+    "decision_model_api_key": {
+      "type": "string",
+      "default": "",
+      "title": "决策模型 API Key",
+      "description": "作为 Authorization: Bearer 发送；环境变量 ZCODE_FENCE_DECISION_MODEL_API_KEY 优先。"
+    },
+    "decision_model_threshold": {
+      "type": "string",
+      "default": "0.6",
+      "title": "决策模型阈值",
+      "description": "0 到 1 的小数。模型给出的确认概率达到阈值才弹确认，默认 0.6。"
+    },
+    "decision_model_timeout_ms": {
+      "type": "string",
+      "default": "3500",
+      "title": "决策模型超时（毫秒）",
+      "description": "默认 3500，最大 4000（hook 总超时 5000ms 必须留余量）；超时 fail-open。"
+    },
+    "decision_model_headers": {
+      "type": "string",
+      "default": "",
+      "title": "决策模型额外请求头",
+      "description": "分号 ; 分隔的 Name: Value，例如 X-Org: demo; X-Trace: on。"
+    },
+    "decision_model_proxy": {
+      "type": "string",
+      "default": "",
+      "title": "决策模型代理",
+      "description": "http:// 代理地址。留空时读取 HTTPS_PROXY/HTTP_PROXY/ALL_PROXY；NO_PROXY 与本机端点始终直连。"
+    },
+    "decision_model_prompt": {
+      "type": "string",
+      "default": "",
+      "title": "决策模型提示词覆盖",
+      "description": "可选，替换“是否该让用户确认”问题的 instructions；不发送文件内容、对话历史或会话记忆。"
     }
   }
 }

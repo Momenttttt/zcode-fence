@@ -20,6 +20,7 @@ const { spawn } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const GUARD = path.join(ROOT, 'plugins', 'zcode-fence', 'scripts', 'guard.js');
+const guard = require(GUARD);
 const TMP = path.join(__dirname, 'tmp');
 const PROJECT = path.join(TMP, 'project');
 const EXTRA = path.join(TMP, 'extra-root');
@@ -189,6 +190,12 @@ function staticChecks() {
   if (!pj.description) errs.push('plugin.json 缺 description');
   if (!i18nOK(pj.description_i18n)) errs.push('plugin.json description_i18n 缺 en/zh-CN 非空项');
   if (!pj.userConfig || !pj.userConfig.custom_rules) errs.push('plugin.json 缺 userConfig.custom_rules');
+  // 代码 DEFAULT_CONFIG 与清单 userConfig 键必须一致（防止配置项漂移）
+  try {
+    assert.deepStrictEqual(Object.keys(pj.userConfig || {}).sort(), Object.keys(guard.DEFAULT_CONFIG).sort());
+  } catch (e) {
+    errs.push('DEFAULT_CONFIG 与 plugin.json userConfig 键不一致（新增配置必须同时改代码与两份清单）');
+  }
 
   const hj = JSON.parse(fs.readFileSync(path.join(ROOT, 'plugins', 'zcode-fence', 'hooks', 'hooks.json'), 'utf8'));
   const groups = hj.hooks && hj.hooks.PreToolUse;

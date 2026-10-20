@@ -173,6 +173,75 @@ t('坏配置 → 默认值 + 留痕', () => {
 });
 t('清单切分容忍空段', () => assert.deepStrictEqual(guard.splitList('a;; b '), ['a', 'b']));
 
+console.log('== 决策模型配置与安全 ==');
+t('阈值与超时钳制（阈值 0..1、超时 100..4000）', () => {
+  const f = path.join(cfgTmp, 'dm-clamp.json');
+  fs.writeFileSync(f, JSON.stringify({ plugins: { options: { 'zcode-fence@m': {
+    decision_model_threshold: '5', decision_model_timeout_ms: '99999',
+  } } } }));
+  const r1 = guard.loadConfig({ ZCODE_FENCE_CONFIG: f }).cfg;
+  assert.strictEqual(r1.decision_model_threshold, 1);
+  assert.strictEqual(r1.decision_model_timeout_ms, 4000);
+  fs.writeFileSync(f, JSON.stringify({ plugins: { options: { 'zcode-fence@m': {
+    decision_model_threshold: '-1', decision_model_timeout_ms: '50', enable_decision_model: 'true',
+  } } } }));
+  const r2 = guard.loadConfig({ ZCODE_FENCE_CONFIG: f }).cfg;
+  assert.strictEqual(r2.decision_model_threshold, 0);
+  assert.strictEqual(r2.decision_model_timeout_ms, 100);
+  assert.strictEqual(r2.enable_decision_model, true);
+});
+t('端点校验：https 任意，http 仅本机/私网', () => {
+  assert.ok(guard.parseModelEndpoint('https://api.example.com/v1/systemone'));
+  assert.ok(guard.parseModelEndpoint('http://127.0.0.1:8080/v1'));
+  assert.ok(guard.parseModelEndpoint('http://localhost:8080/v1'));
+  assert.ok(guard.parseModelEndpoint('http://192.168.1.5/v1'));
+  assert.ok(guard.parseModelEndpoint('http://[::1]:8080/v1'));
+  assert.strictEqual(guard.parseModelEndpoint('http://example.com/v1'), null);
+  assert.strictEqual(guard.parseModelEndpoint('ftp://example.com/v1'), null);
+  assert.strictEqual(guard.parseModelEndpoint(''), null);
+});
+t('代理解析：配置覆盖环境、NO_PROXY、本机直连', () => {
+  const ep = (u) => guard.parseModelEndpoint(u);
+  const target = ep('https://api.example.com/x');
+  assert.strictEqual(guard.resolveProxy(target, { decision_model_proxy: '' },
+    { HTTPS_PROXY: 'http://proxy:3128' }).url.host, 'proxy:3128');
+  assert.strictEqual(guard.resolveProxy(target, { decision_model_proxy: '' },
+    { HTTPS_PROXY: 'http://proxy:3128', NO_PROXY: 'api.example.com' }).url, null);
+  assert.strictEqual(guard.resolveProxy(target, { decision_model_proxy: 'http://cfg:8080' },
+    { HTTPS_PROXY: 'http://env:1' }).url.host, 'cfg:8080');
+  assert.strictEqual(guard.resolveProxy(ep('http://127.0.0.1:9/x'), { decision_model_proxy: '' },
+    { HTTPS_PROXY: 'http://proxy:1' }).url, null);
+  assert.ok(guard.resolveProxy(target, { decision_model_proxy: '' },
+    { HTTPS_PROXY: 'https://proxy:1' }).error, 'https 代理应拒绝');
+});
+t('响应解析：noul/probability/score 与 choice/probabilities', () => {
+  assert.deepStrictEqual(guard.parseModelAnswer({ answers: { ask: { noul: 0.8 }, kind: { choice: 'git_history' } } }),
+    { score: 0.8, kind: 'git_history' });
+  assert.deepStrictEqual(guard.parseModelAnswer({ answers: { ask: { probability: 0.3 } } }),
+    { score: 0.3, kind: 'unknown' });
+  assert.deepStrictEqual(guard.parseModelAnswer({ answers: { ask: { score: 0.5 }, kind: { probabilities: { a: 0.2, b: 0.9 } } } }),
+    { score: 0.5, kind: 'b' });
+  assert.strictEqual(guard.parseModelAnswer({ answers: {} }), null);
+  assert.strictEqual(guard.parseModelAnswer({}), null);
+  assert.strictEqual(guard.parseModelAnswer(null), null);
+});
+t('发送前脱敏：API key/password/Bearer/私钥块/长密钥', () => {
+  const key = 'sk-live-abcdefghijklmnop';
+  const nl = String.fromCharCode(10);
+  const raw = 'curl -H "Authorization: Bearer abcdefghijklmnop" --data API_KEY=' + key +
+    ' password="hunter2secret" -----BEGIN RSA PRIVATE KEY-----' + nl + 'MIIEsecret' + nl +
+    '-----END RSA PRIVATE KEY----- deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+  const out = guard.sanitizeModelInput(raw, key);
+  assert.ok(out.indexOf(key) < 0);
+  assert.ok(out.indexOf('hunter2secret') < 0);
+  assert.ok(out.indexOf('abcdefghijklmnop') < 0);
+  assert.ok(out.indexOf('MIIEsecret') < 0);
+  assert.ok(out.indexOf('deadbeefdeadbeef') < 0);
+  assert.ok(out.indexOf('[REDACTED]') >= 0);
+  assert.ok(out.indexOf('[REDACTED PRIVATE KEY]') >= 0);
+  assert.strictEqual(guard.sanitizeModelInput('echo hi'), 'echo hi');
+});
+
 console.log('== 决策日志目录解析（dataDir 优先级）==');
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-fence-home-'));
 const fakeData = path.join(fakeHome, '.zcode', 'cli', 'plugins', 'data');

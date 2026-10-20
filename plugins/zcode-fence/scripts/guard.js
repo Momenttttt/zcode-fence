@@ -17,6 +17,9 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const http = require('http');
+const https = require('https');
+const tls = require('tls');
 
 const PLUGIN_ID = 'zcode-fence';
 const MAX_DEPTH = 3; // 包装器（cmd /c、bash -c、powershell -Command）递归深度上限
@@ -47,7 +50,23 @@ const DEFAULT_CONFIG = {
   custom_rules: '',
   extra_writable_roots: '',
   enable_log: true,
+  // 可选决策模型审核层（默认关闭，不配置端点时绝不发起网络请求）
+  enable_decision_model: false,
+  decision_model_endpoint: '',
+  decision_model_model: '',
+  decision_model_api_key: '',
+  decision_model_threshold: 0.6,
+  decision_model_timeout_ms: 3500,
+  decision_model_headers: '',
+  decision_model_proxy: '',
+  decision_model_prompt: '',
 };
+
+function clampNumber(v, dflt, min, max) {
+  const n = typeof v === 'number' ? v : parseFloat(String(v == null ? '' : v).trim());
+  if (!isFinite(n)) return dflt;
+  return Math.min(max, Math.max(min, n));
+}
 
 // 每次工具调用现读 ~/.zcode/cli/config.json，改完即生效
 function loadConfig(env) {
@@ -77,6 +96,15 @@ function loadConfig(env) {
           cfg.custom_rules = typeof user.custom_rules === 'string' ? user.custom_rules : '';
           cfg.extra_writable_roots = typeof user.extra_writable_roots === 'string' ? user.extra_writable_roots : '';
           cfg.enable_log = truthy(user.enable_log, true);
+          cfg.enable_decision_model = truthy(user.enable_decision_model, false);
+          cfg.decision_model_endpoint = typeof user.decision_model_endpoint === 'string' ? user.decision_model_endpoint.trim() : '';
+          cfg.decision_model_model = typeof user.decision_model_model === 'string' ? user.decision_model_model.trim() : '';
+          cfg.decision_model_api_key = typeof user.decision_model_api_key === 'string' ? user.decision_model_api_key : '';
+          cfg.decision_model_threshold = clampNumber(user.decision_model_threshold, 0.6, 0, 1);
+          cfg.decision_model_timeout_ms = Math.round(clampNumber(user.decision_model_timeout_ms, 3500, 100, 4000));
+          cfg.decision_model_headers = typeof user.decision_model_headers === 'string' ? user.decision_model_headers : '';
+          cfg.decision_model_proxy = typeof user.decision_model_proxy === 'string' ? user.decision_model_proxy.trim() : '';
+          cfg.decision_model_prompt = typeof user.decision_model_prompt === 'string' ? user.decision_model_prompt : '';
         }
       }
     } catch (e) {
@@ -1822,6 +1850,345 @@ function writeLog(record, env, enabled) {
   } catch (e) { /* 日志失败不影响判定 */ }
 }
 
+/* ================================================================
+ * 可选决策模型审核层（默认关闭）
+ *
+ * 只在确定性两层都 silent 时调用：单问「是否该让用户确认」+ 效果类别；
+ * 模型只能产生 ask 或沉默。超时/网络错误/非法响应/未配置端点一律 fail-open
+ * 并写入决策日志。零依赖（Node 内置 http/https/tls），Node 16 兼容。
+ * ================================================================ */
+
+const MODEL_MAX_INPUT_CHARS = 2000;
+const MODEL_KINDS = ['read_only', 'project_write', 'git_history', 'data_deletion',
+  'system_change', 'external_side_effect', 'exfiltration'];
+
+function isLocalAddress(host) {
+  let h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return false;
+  if (h === 'localhost' || h === '::1' || h === '0.0.0.0') return true;
+  if (/^127\./.test(h)) return true;
+  if (/^10\./.test(h)) return true;
+  if (/^192\.168\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+  if (/^169\.254\./.test(h)) return true;              // IPv4 link-local
+  if (/^f[cd][0-9a-f]{0,2}:/i.test(h)) return true;     // IPv6 ULA
+  if (/^fe[89ab][0-9a-f]{0,2}:/i.test(h)) return true;  // IPv6 link-local
+  return false;
+}
+
+// 端点必须 https，或本机/私网 http（非法端点拒绝调用并 fail-open）
+function parseModelEndpoint(raw) {
+  if (!raw) return null;
+  let u;
+  try { u = new URL(String(raw)); } catch (e) { return null; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  if (u.protocol === 'http:' && !isLocalAddress(u.hostname)) return null;
+  return u;
+}
+
+function noProxyMatches(host, noProxy) {
+  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
+  for (const raw of String(noProxy || '').split(',')) {
+    let t = raw.trim().toLowerCase();
+    if (!t) continue;
+    if (t === '*') return true;
+    t = t.replace(/^\./, '');
+    const hp = t.indexOf(':') >= 0 ? t.split(':')[0] : t;
+    if (h === hp || h.endsWith('.' + hp)) return true;
+  }
+  return false;
+}
+
+// 代理优先级：配置 > 环境（HTTPS_PROXY/HTTP_PROXY/ALL_PROXY）；本机端点与 NO_PROXY 直连
+function resolveProxy(endpoint, cfg, env) {
+  if (isLocalAddress(endpoint.hostname)) return { url: null, error: null };
+  const noProxy = env.NO_PROXY || env.no_proxy || '';
+  if (noProxyMatches(endpoint.hostname, noProxy)) return { url: null, error: null };
+  const raw = cfg.decision_model_proxy ||
+    (endpoint.protocol === 'https:'
+      ? (env.HTTPS_PROXY || env.https_proxy)
+      : (env.HTTP_PROXY || env.http_proxy)) ||
+    env.ALL_PROXY || env.all_proxy || '';
+  if (!raw) return { url: null, error: null };
+  let p;
+  try { p = new URL(String(raw)); } catch (e) { return { url: null, error: '代理地址非法' }; }
+  if (p.protocol !== 'http:') return { url: null, error: '仅支持 http:// 代理' };
+  return { url: p, error: null };
+}
+
+// 发送前脱敏：API key/token/password/Authorization/私钥块/长密钥；默认不发送文件内容
+function sanitizeModelInput(text, apiKey) {
+  let s = String(text == null ? '' : text);
+  if (apiKey) s = s.split(String(apiKey)).join('[REDACTED]');
+  s = s.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+    '[REDACTED PRIVATE KEY]');
+  s = s.replace(/\b(Bearer)\s+[A-Za-z0-9._\-+/=]{8,}/gi, '$1 [REDACTED]');
+  s = s.replace(/\b(api[_-]?key|token|password|passwd|pwd|secret|access[_-]?key|secret[_-]?key|client[_-]?secret|authorization)\b(\s*[:=]\s*)(['"]?)[^\s'";,]{3,}\3/gi,
+    '$1$2$3[REDACTED]$3');
+  // 长密钥：32 位以上的 hex 串或含数字的长 token（git SHA、base64 密钥等）
+  s = s.replace(/\b[A-Za-z0-9_\-]{32,}={0,2}\b/g, (m) => {
+    const core = m.replace(/=+$/, '');
+    return /^[0-9a-f]+$/i.test(core) || /\d/.test(core) ? '[REDACTED]' : m;
+  });
+  return s;
+}
+
+// headers 配置：分号分隔的 "Name: Value"（设置界面单行输入）
+function parseModelHeaders(s) {
+  const out = {};
+  for (const part of splitList(s)) {
+    const i = part.indexOf(':');
+    if (i <= 0) continue;
+    const k = part.slice(0, i).trim();
+    const v = part.slice(i + 1).trim();
+    if (k && v) out[k] = v;
+  }
+  return out;
+}
+
+// 解析 answers.ask 概率（noul/probability/score）与 answers.kind.choice
+function parseModelAnswer(body) {
+  if (!body || typeof body !== 'object') return null;
+  const answers = body.answers;
+  if (!answers || typeof answers !== 'object' || Array.isArray(answers)) return null;
+  const a = answers.ask;
+  if (!a || typeof a !== 'object') return null;
+  let score = a.noul != null ? a.noul : (a.probability != null ? a.probability : a.score);
+  score = Number(score);
+  if (!isFinite(score)) return null;
+  let kind = 'unknown';
+  const k = answers.kind;
+  if (k && typeof k === 'object') {
+    if (typeof k.choice === 'string' && k.choice) {
+      kind = k.choice;
+    } else if (k.probabilities && typeof k.probabilities === 'object') {
+      let best = null;
+      for (const key of Object.keys(k.probabilities)) {
+        const v = Number(k.probabilities[key]);
+        if (isFinite(v) && (best === null || v > best.v)) best = { key, v };
+      }
+      if (best) kind = best.key;
+    }
+  } else if (typeof k === 'string' && k) {
+    kind = k;
+  }
+  return { score, kind };
+}
+
+function modelQuestions(cfg) {
+  const ask = cfg.decision_model_prompt ||
+    'This is a pre-tool-use check for an AI coding agent. Would a careful engineer want the ' +
+    'user to explicitly confirm this exact tool call before it runs? Judge only the call and ' +
+    'its stated effect; routine reads, builds, tests and writes inside the project do not need confirmation.';
+  const criteria = {
+    read_only: 'Reads or inspects data without changing state.',
+    project_write: 'Creates or modifies files inside the project; easy to undo.',
+    git_history: 'Changes git history, branches, tags, remotes, or discards uncommitted work.',
+    data_deletion: 'Deletes files or data, especially outside routine project cleanup or irreversibly.',
+    system_change: 'Changes system configuration, services, persistence, storage, or package state.',
+    external_side_effect: 'Sends data to or changes state on an external service.',
+    exfiltration: 'Moves credentials, secrets, or private user data off the machine.',
+  };
+  const questions = {
+    ask: {
+      type: 'noul',
+      instructions: ask,
+      criteria: {
+        true: 'It may delete or overwrite data, rewrite git history, change system configuration ' +
+          'or services, execute downloaded content, send data to an external service, or ' +
+          'otherwise have effects the user should approve first.',
+        false: 'It is routine and reversible inside the project, or read-only.',
+      },
+    },
+    kind: {
+      type: 'choice',
+      instructions: 'Which best describes the effect of this tool call?',
+      criteria,
+    },
+  };
+  return questions;
+}
+
+/**
+ * 发起一次 HTTP POST（JSON）。proxy 非空时走 http 代理（https 目标用 CONNECT 隧道）。
+ * 回调 cb(err, statusCode, text)；超时/错误由内部定时器与 socket 销毁兜底。
+ */
+function httpPostJson(endpoint, proxy, extraHeaders, bodyObj, timeoutMs, cb) {
+  const payload = Buffer.from(JSON.stringify(bodyObj), 'utf8');
+  const headers = Object.assign({ 'Content-Type': 'application/json', 'Content-Length': payload.length }, extraHeaders);
+  let finished = false;
+  const sockets = [];
+  let timer = null;
+  const done = (err, status, text) => {
+    if (finished) return;
+    finished = true;
+    if (timer) clearTimeout(timer);
+    for (const s of sockets) { try { s.destroy(); } catch (e) { /* 已关闭 */ } }
+    cb(err, status, text);
+  };
+  timer = setTimeout(() => done(new Error('超时')), timeoutMs);
+
+  const targetHost = endpoint.hostname.replace(/^\[|\]$/g, '');
+  const targetPort = endpoint.port || (endpoint.protocol === 'https:' ? 443 : 80);
+  const targetPath = (endpoint.pathname || '/') + (endpoint.search || '');
+
+  const onResponse = (res) => {
+    let text = '';
+    res.setEncoding('utf8');
+    res.on('data', (d) => { if (text.length < 65536) text += d; });
+    res.on('end', () => done(null, res.statusCode, text));
+    res.on('error', done);
+  };
+
+  if (!proxy) {
+    const mod = endpoint.protocol === 'https:' ? https : http;
+    const req = mod.request({
+      hostname: targetHost, port: targetPort, path: targetPath, method: 'POST',
+      headers, agent: false,
+    }, onResponse);
+    req.on('socket', (s) => sockets.push(s));
+    req.on('error', done);
+    req.end(payload);
+    return;
+  }
+
+  const proxyHost = proxy.hostname.replace(/^\[|\]$/g, '');
+  const proxyPort = proxy.port || 80;
+  if (endpoint.protocol === 'http:') {
+    const req = http.request({
+      hostname: proxyHost, port: proxyPort, path: endpoint.href, method: 'POST',
+      headers: Object.assign({ Host: endpoint.host }, headers), agent: false,
+    }, onResponse);
+    req.on('socket', (s) => sockets.push(s));
+    req.on('error', done);
+    req.end(payload);
+    return;
+  }
+
+  // https 目标经 HTTP 代理：CONNECT 隧道后在该 socket 上做 TLS
+  const authority = targetHost + ':' + targetPort;
+  const creq = http.request({
+    hostname: proxyHost, port: proxyPort, method: 'CONNECT', path: authority,
+    headers: { Host: authority }, agent: false,
+  });
+  creq.on('socket', (s) => sockets.push(s));
+  creq.on('error', done);
+  creq.on('connect', (res, socket) => {
+    sockets.push(socket);
+    if (res.statusCode !== 200) { done(new Error('代理 CONNECT ' + res.statusCode)); return; }
+    const tlsSock = tls.connect({ socket, servername: targetHost }, () => {
+      const req = https.request({
+        hostname: targetHost, port: targetPort, path: targetPath, method: 'POST',
+        headers, agent: false, createConnection: () => tlsSock,
+      }, onResponse);
+      req.on('error', done);
+      req.end(payload);
+    });
+    sockets.push(tlsSock);
+    tlsSock.on('error', done);
+  });
+  creq.end();
+}
+
+async function decisionModelJudge(payload, judged, env) {
+  const cfg = judged.ctx.cfg;
+  const rec = { enabled: true, invoked: false, model: cfg.decision_model_model || '', outcome: 'skipped' };
+  const fail = (why) => {
+    rec.outcome = 'fail-open';
+    rec.error = why;
+    return { reason: null, record: rec };
+  };
+  const endpoint = parseModelEndpoint(cfg.decision_model_endpoint);
+  if (!cfg.decision_model_endpoint) return fail('端点未配置');
+  if (!endpoint) return fail('端点非法（必须是 https，或本机/私网 http）');
+  const proxy = resolveProxy(endpoint, cfg, env);
+  if (proxy.error) return fail(proxy.error);
+
+  const apiKey = env.ZCODE_FENCE_DECISION_MODEL_API_KEY ||
+    env.DECISION_MODEL_API_KEY || cfg.decision_model_api_key || '';
+  const headers = parseModelHeaders(cfg.decision_model_headers);
+  if (apiKey && !Object.keys(headers).some((k) => k.toLowerCase() === 'authorization')) {
+    headers.Authorization = 'Bearer ' + apiKey;
+  }
+  let input = sanitizeModelInput(judged.detail, apiKey);
+  if (input.length > MODEL_MAX_INPUT_CHARS) input = input.slice(0, MODEL_MAX_INPUT_CHARS) + '…';
+  const body = {
+    state: {
+      tool: judged.tool || 'unknown',
+      input,
+      project_root: judged.ctx.projectDir || '',
+    },
+    questions: modelQuestions(cfg),
+  };
+  if (cfg.decision_model_model) body.model = cfg.decision_model_model;
+
+  rec.invoked = true;
+  rec.endpoint_host = endpoint.host;
+  const start = Date.now();
+  const resp = await new Promise((resolve) => {
+    httpPostJson(endpoint, proxy.url, headers, body, cfg.decision_model_timeout_ms,
+      (err, status, text) => resolve({ err, status, text }));
+  });
+  rec.elapsed_ms = Date.now() - start;
+  if (resp.err) return fail(resp.err.message || String(resp.err));
+  if (resp.status < 200 || resp.status >= 300) return fail('HTTP ' + resp.status);
+  let parsed;
+  try { parsed = JSON.parse(resp.text); } catch (e) { return fail('响应不是合法 JSON'); }
+  const ans = parseModelAnswer(parsed);
+  if (!ans) return fail('响应缺少 answers.ask');
+  rec.score = ans.score;
+  rec.kind = ans.kind;
+  if (ans.score >= cfg.decision_model_threshold) {
+    rec.outcome = 'ask';
+    return {
+      reason: '[' + PLUGIN_ID + ': 决策模型] 建议确认：' + ans.kind +
+        '（分数 ' + ans.score.toFixed(2) + '，阈值 ' + cfg.decision_model_threshold + '）',
+      record: rec,
+    };
+  }
+  rec.outcome = 'silent';
+  return { reason: null, record: rec };
+}
+
+/**
+ * 异步版核心执行：确定性层 silent 且启用决策模型时，多问一次模型。
+ * 任何失败都不影响确定性层结论（fail-open）。
+ */
+async function runGuardAsync(stdinText, env, source) {
+  let payload = null;
+  let parseErr = null;
+  try { payload = JSON.parse(stdinText); } catch (e) { parseErr = e; }
+
+  if (parseErr) {
+    const rec = { source, level: 'error', verdict: 'error', note: 'stdin 非法 JSON: ' + parseErr.message, stdin: snippet(stdinText) };
+    return { out: '', record: rec };
+  }
+  try {
+    const r = judgePayload(payload, env);
+    const reasons = r.reasons.slice();
+    let dmRecord = null;
+    if (!reasons.length && r.ctx.cfg.enable_decision_model &&
+        /^(bash|write|edit|applypatch)$/i.test(r.tool)) {
+      const dm = await decisionModelJudge(payload, r, env);
+      if (dm.reason) reasons.push(dm.reason);
+      dmRecord = dm.record;
+    }
+    const rec = {
+      source, level: 'info',
+      verdict: reasons.length ? 'ask' : 'silent',
+      tool: r.tool, detail: snippet(r.detail),
+      reasons,
+      project_dir: r.ctx.projectDir || '',
+      config_notes: r.ctx.notes,
+    };
+    if (dmRecord) rec.decision_model = dmRecord;
+    return { out: reasons.length ? askJson(reasons) : '', record: rec };
+  } catch (e) {
+    const rec = { source, level: 'error', verdict: 'error', note: '内部异常: ' + ((e && e.stack) || e) };
+    return { out: '', record: rec }; // fail-open
+  }
+}
+
 /**
  * 核心执行：输入 hook stdin 文本，产出 { out, record }。
  * out 为空字符串 = 沉默放行（交还宿主按其自身模式处理）。
@@ -1898,33 +2265,39 @@ function main() {
   const argv = process.argv.slice(2);
   if (argv[0] === '--help' || argv[0] === '-h') {
     process.stdout.write(HELP + '\n');
-    return;
+    return Promise.resolve();
   }
   if (argv[0] === '--eval' || argv[0] === '--eval-write' || argv[0] === '--eval-edit') {
     const target = argv.slice(1).join(' ');
     const payload = argv[0] === '--eval'
       ? { tool_name: 'Bash', tool_input: { command: target } }
       : { tool_name: argv[0] === '--eval-write' ? 'Write' : 'Edit', tool_input: { file_path: target } };
-    const r = runGuard(JSON.stringify(payload), process.env, 'eval');
-    writeLog(r.record, process.env, loadConfig(process.env).cfg.enable_log); // 日志开关与 hook 模式一致
-    process.stdout.write(r.out);
-    evalSummary(r.record);
-    return;
+    return runGuardAsync(JSON.stringify(payload), process.env, 'eval').then((r) => {
+      writeLog(r.record, process.env, loadConfig(process.env).cfg.enable_log); // 日志开关与 hook 模式一致
+      process.stdout.write(r.out);
+      evalSummary(r.record);
+    });
   }
   // hook 模式
-  readAllStdin((text) => {
-    const r = runGuard(text, process.env, 'hook');
-    const logEnabled = loadConfig(process.env).cfg.enable_log;
-    writeLog(r.record, process.env, logEnabled);
-    process.stdout.write(r.out);
+  return new Promise((resolve) => {
+    readAllStdin((text) => {
+      runGuardAsync(text, process.env, 'hook').then((r) => {
+        const logEnabled = loadConfig(process.env).cfg.enable_log;
+        writeLog(r.record, process.env, logEnabled);
+        process.stdout.write(r.out);
+        resolve();
+      });
+    });
   });
 }
 
 module.exports = {
   PLUGIN_ID,
+  DEFAULT_CONFIG,
   normalizePath,
   expandVars,
   splitSegments,
+  splitSegmentsWithOps,
   tokenize,
   parseCmd,
   extractPathTokens,
@@ -1947,6 +2320,18 @@ module.exports = {
   fenceSegment,
   judgePayload,
   runGuard,
+  runGuardAsync,
+  decisionModelJudge,
+  sanitizeModelInput,
+  parseModelEndpoint,
+  parseModelAnswer,
+  parseModelHeaders,
+  resolveProxy,
+  isLocalAddress,
+  gitDisposition,
 };
 
-if (require.main === module) main();
+if (require.main === module) {
+  // fail-open：CLI 层的意外异常也不能以非零码结束或卡住 hook
+  main().catch(() => {});
+}

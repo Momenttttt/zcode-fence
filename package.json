@@ -8,7 +8,7 @@
     "node": ">=16"
   },
   "scripts": {
-    "test": "node tests/unit.js && node tests/run.js"
+    "test": "node tests/unit.js && node tests/run.js && node tests/decision-model.js"
   },
   "repository": {
     "type": "git",
