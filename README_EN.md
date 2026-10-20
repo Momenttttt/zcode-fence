@@ -44,8 +44,10 @@ Two independent deterministic layers, plus an optional decision-model review lay
 **Non-goals (honest disclosure)**: this is not an OS-level sandbox. It inspects command text before execution; the following evade it by nature (it protects against accidents, not deliberate circumvention):
 
 - encoded payloads (`powershell -EncodedCommand`), script file contents (`powershell -File x.ps1`, `node x.js`), writes whose payload carries no path literal (concatenation like `process.env.HOME + '/x'`, or a command assembled from variables and passed to `child_process` indirectly);
-- sensitive-file reads/exfiltration (SSH private keys, `.env`, cloud credentials); relative out-of-bounds writes are now covered by in-command cwd tracking (`cd /c/Users/x && touch y` asks); relative targets are only allowed under the project/memory/extra roots, so cd-ing into the temp directory and writing a relative path asks (use an absolute temp path instead);
+- sensitive-file reads/exfiltration (SSH private keys, `.env`, cloud credentials);
 - network access (ZCode's plugin API cannot control it).
+
+Relative out-of-bounds writes are not in this list: in-command cwd tracking judges `cd /c/Users/x && touch y`; relative targets are only allowed under the project/memory/extra roots, so use an absolute temp path for temp files.
 
 ## ask-only: only tighten, never loosen (the key design decision)
 
