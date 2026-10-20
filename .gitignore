@@ -5,3 +5,10 @@ AGENTS.md
 .DS_Store
 Thumbs.db
 .zcodeignore
+
+# matt 工作流文档（本地保留，不进仓库）
+.scratch/
+docs/agents/
+GLOSSARY.md
+GLOSSARY-MAP.md
+docs/adr/

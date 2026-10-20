@@ -378,9 +378,82 @@ function extractRedirects(seg) {
  * 命令首词解析（token 级精确匹配的地基：echo "rm -rf /" 不误伤）
  * ================================================================ */
 
-const PREFIX_CMDS = new Set(['sudo', 'env', 'nohup', 'nice', 'time', 'command', 'exec', 'strace', 'valgrind']);
+// 包装器选项表：跳过选项链（含带值选项）后继续 dispatch 内层命令。
+// value 为需要独立值的选项；attached 为可附着写法（-o0 / -o 0 / --output=0）的选项。
+// 未列出的开关按无值跳过 —— 宁可多剥一层，也不能让选项链把内层命令藏起来。
+const WRAPPER_SPECS = {
+  sudo: {
+    value: ['-u', '--user', '-g', '--group', '-p', '--prompt', '-C', '--close-from', '-h', '--host',
+      '-r', '--role', '-t', '--type', '-U', '--other-user', '-T', '--command-timeout', '-D', '--chdir'],
+    flag: ['-n', '-E', '-H', '-k', '-K', '-S', '-b', '-A', '-B', '-P', '-e', '--preserve-env',
+      '--reset-timestamp', '--non-interactive', '--stdin', '--set-home', '--background',
+      '--askpass', '--bell', '--help', '--version'],
+  },
+  env: {
+    value: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string', '--block-signal',
+      '--default-signal', '--ignore-signal'],
+    flag: ['-i', '-0', '--ignore-environment', '--null', '-v', '--debug', '--help', '--version'],
+  },
+  nice: {
+    value: ['-n', '--adjustment'],
+    flag: ['--help', '--version'],
+  },
+  timeout: {
+    value: ['-s', '--signal', '-k', '--kill-after'],
+    flag: ['--preserve-status', '--foreground', '-v', '--verbose', '--help', '--version'],
+    positional: 1, // 时长参数（timeout 10 <cmd>）
+  },
+  stdbuf: {
+    value: ['-i', '-o', '-e', '--input', '--output', '--error'],
+    flag: ['--help', '--version'],
+    attached: ['-i', '-o', '-e'],
+  },
+  nohup: {
+    flag: ['--help', '--version'],
+  },
+  time: {
+    value: ['-o', '--output', '-f', '--format'],
+    flag: ['-p', '-v', '-a', '--append', '--help', '--version'],
+  },
+  command: {
+    flag: ['-p', '-v', '-V', '--help'],
+  },
+  exec: {
+    value: ['-a'],
+    flag: ['-c', '-l', '--help', '--version'],
+  },
+  strace: {
+    value: ['-o', '-e', '-p', '-s', '-u', '-E', '-I', '-b', '-a', '--output', '--trace', '--expr'],
+    flag: ['-f', '-F', '-c', '-q', '-v', '-x', '-y', '-t', '-tt', '-T', '-r', '-k', '-n',
+      '--help', '--version'],
+  },
+  wsl: {
+    value: ['-d', '--distribution', '-u', '--user', '-e', '--exec', '--cd'],
+    flag: ['-l', '--list', '--install', '--status', '--version', '--help', '--shutdown', '-t', '--terminate'],
+  },
+};
+const PREFIX_CMDS = new Set(['valgrind', 'busybox']);
 // bash 控制流关键字：分段后可能落在段首（`; then rm ...`），跳过后继续 dispatch 真正的命令词
 const CONTROL_FLOW = new Set(['then', 'do', 'else', 'elif', 'done', 'fi', 'esac', 'in', '{', '}', '!']);
+
+// 跳过包装器名字之后的选项链与固定位置参数，返回内层命令词下标
+function skipOptionChain(tokens, start, spec) {
+  const value = spec.value || [];
+  const attached = spec.attached || [];
+  let i = start;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (t === '--') { i++; break; }
+    if (t === '-' || t[0] !== '-') break;
+    if (t.slice(0, 2) === '--' && t.indexOf('=') > 0) { i++; continue; } // --opt=value
+    if (value.indexOf(t) >= 0) { i += 2; continue; }
+    if (t.length === 2 && attached.indexOf(t) >= 0) { i += 2; continue; } // -o 0
+    i++; // 普通开关、组合短开关、附着式（-o0）
+  }
+  let pos = spec.positional || 0;
+  while (pos > 0 && i < tokens.length && tokens[i][0] !== '-') { i++; pos--; }
+  return i;
+}
 
 function parseCmd(tokens) {
   let i = 0;
@@ -393,6 +466,7 @@ function parseCmd(tokens) {
     const slash = Math.max(base.lastIndexOf('/'), base.lastIndexOf('\\'));
     if (slash >= 0) base = base.slice(slash + 1);
     base = base.toLowerCase().replace(/\.(exe|cmd|bat|com|ps1)$/, '');
+    if (WRAPPER_SPECS[base]) { i = skipOptionChain(tokens, i + 1, WRAPPER_SPECS[base]); continue; }
     if (PREFIX_CMDS.has(base) || CONTROL_FLOW.has(base)) { i++; continue; }
     return { name: base, args: tokens.slice(i + 1) };
   }
@@ -425,18 +499,51 @@ function recursiveFlag(args) {
   return false;
 }
 
-function dangerTargetsOf(seg, ctx) {
-  return extractPathTokens(seg)
-    .map((t) => normalizePath(t, ctx.npBash))
-    .filter((info) => isDangerTarget(info, ctx))
-    .map((info) => info.norm);
+/* ---- 命令内 cwd 状态与相对路径解析（cd/pushd/popd 跟踪） ---- */
+
+// 相对路径按当前命令内 cwd 解析；cwd 未知时返回 null（fail-open，不判归属）
+function resolveAgainstCwd(info, cwd, ctx) {
+  if (!info || info.kind !== 'relative') return info;
+  if (!cwd) return null;
+  const sep = cwd.indexOf('\\') >= 0 ? '\\' : '/';
+  const joined = cwd.replace(/[\\\/]+$/, '') + sep + info.norm;
+  const r = normalizePath(joined, ctx.npBash);
+  if (r.kind === 'drive' || r.kind === 'unix' || r.kind === 'unc') return r;
+  return null;
+}
+
+function resolveTarget(raw, ctx, cwd) {
+  const info = normalizePath(raw, ctx.npBash);
+  if (info.kind === 'relative') return cwd ? resolveAgainstCwd(info, cwd, ctx) : null;
+  return info;
+}
+
+// 命令操作数（跳过开关与 Windows /x 单字母开关）
+function operandTokens(args) {
+  const out = [];
+  for (const t of args) {
+    if (!t) continue;
+    if (t.length > 1 && t[0] === '-') continue;
+    if (/^\/[A-Za-z]$/.test(t)) continue;
+    out.push(t);
+  }
+  return out;
+}
+
+function dangerTargetsOf(args, ctx, cwd) {
+  const out = [];
+  for (const t of operandTokens(args)) {
+    const info = resolveTarget(t, ctx, cwd);
+    if (info && isDangerTarget(info, ctx)) out.push(info.norm);
+  }
+  return out;
 }
 
 function gateReason(add, label, rule) {
   add('[' + PLUGIN_ID + ': 危险命令] ' + label + '（规则 ' + rule + '）');
 }
 
-function gateSegment(seg, ctx, depth, add) {
+function gateSegment(seg, ctx, depth, add, cwd) {
   if (depth > MAX_DEPTH) return;
   const tokens = tokenize(seg);
   const pc = parseCmd(tokens);
@@ -447,19 +554,19 @@ function gateSegment(seg, ctx, depth, add) {
 
   if (name === 'rm') {
     if (args.indexOf('--no-preserve-root') >= 0) {
-      if (extractPathTokens(seg).length) {
+      if (operandTokens(args).length) {
         gateReason(add, 'rm 使用 --no-preserve-root 删除绝对路径', 'DG-RM-NO-PRESERVE-ROOT');
         return;
       }
     }
     if (recursiveFlag(args)) {
-      const hits = dangerTargetsOf(seg, ctx);
+      const hits = dangerTargetsOf(args, ctx, cwd);
       if (hits.length) gateReason(add, 'rm 递归删除灾难级目标 ' + hits.join('、'), 'DG-RM-RECURSIVE');
     }
     return;
   }
   if (WIN_DEL_CMDS.has(name)) {
-    const hits = dangerTargetsOf(seg, ctx);
+    const hits = dangerTargetsOf(args, ctx, cwd);
     if (hits.length) gateReason(add, name + ' 作用于灾难级目标 ' + hits.join('、'), 'DG-WIN-DELETE');
     return;
   }
@@ -518,7 +625,7 @@ function gateSegment(seg, ctx, depth, add) {
   }
   if (name === 'chmod' || name === 'chown') {
     if (recursiveFlag(args)) {
-      const hits = dangerTargetsOf(seg, ctx);
+      const hits = dangerTargetsOf(args, ctx, cwd);
       if (hits.length) gateReason(add, name + ' -R 作用于 ' + hits.join('、'), 'DG-CHMOD-RECURSIVE');
     }
     return;
@@ -553,7 +660,7 @@ function gateSegment(seg, ctx, depth, add) {
   // ---- 包装器 ----
   if (name === 'powershell' || name === 'pwsh') {
     const payload = psPayloadOf(args);
-    if (payload) psJudge(payload, ctx, depth, add);
+    if (payload) psJudge(payload, ctx, depth, add, cwd);
     return;
   }
   // ---- 解释器内嵌脚本（node -e / python -c / perl -e / ruby -e）----
@@ -564,12 +671,12 @@ function gateSegment(seg, ctx, depth, add) {
   }
   const inner = unwrapWrapper(name, args);
   if (inner != null) {
-    judgeCommand(inner, ctx, depth + 1, add);
+    judgeCommand(inner, ctx, depth + 1, add, cwd);
     return;
   }
   // ---- PowerShell cmdlet 作为段首（powershell 载荷按 ;| 换行 切段后进入这里）----
   if (PS_REMOVE.has(name)) {
-    const hits = dangerTargetsOf(seg, ctx);
+    const hits = dangerTargetsOf(args, ctx, cwd);
     if (hits.length) gateReason(add, 'Remove-Item 作用于灾难级目标 ' + hits.join('、'), 'DG-PS-REMOVE');
     return;
   }
@@ -593,17 +700,29 @@ function psPayloadOf(args) {
   return null;
 }
 
+// shell 解释器的 -c 载荷：支持组合短开关（bash -lc、sh -ec、zsh -ic）
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash', 'mksh']);
+
+function shellDashCOf(args) {
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i];
+    if (t === '--' || t === '-' || t[0] !== '-') return null;
+    if (/^-[A-Za-z]+$/.test(t) && t.slice(1).indexOf('c') >= 0) {
+      return i + 1 < args.length ? args.slice(i + 1).join(' ') : null;
+    }
+    if (t === '-o' || t === '+o' || t === '-O' || t === '+O' ||
+        t === '--rcfile' || t === '--init-file') i++; // 带独立值的开关跳过其值
+  }
+  return null;
+}
+
 // cmd /c、bash -c、wsl 等包装器解包；返回内层命令字符串，非包装器返回 null
 function unwrapWrapper(name, args) {
   if (name === 'cmd') {
     const inner = args.filter((t) => !/^\/[cCkK]$/.test(t) && !/^-[cC]$/.test(t)).join(' ');
     return inner ? inner.replace(/^["']|["']$/g, '') : null;
   }
-  if (name === 'bash' || name === 'sh' || name === 'zsh' || name === 'dash' || name === 'ksh' || name === 'ash') {
-    const ci = args.indexOf('-c');
-    if (ci >= 0 && ci + 1 < args.length) return args.slice(ci + 1).join(' ');
-    return null;
-  }
+  if (SHELLS.has(name)) return shellDashCOf(args);
   if (name === 'wsl' || name === 'busybox') {
     const inner = args.join(' ');
     return inner || null;
@@ -619,11 +738,11 @@ function unwrapWrapper(name, args) {
   return null;
 }
 
-function psJudge(payload, ctx, depth, add) {
+function psJudge(payload, ctx, depth, add, cwd) {
   if (depth > MAX_DEPTH || !payload) return;
   for (const sub of splitSegments(payload)) {
-    if (ctx.cfg.enable_danger_gate) gateSegment(sub, ctx, depth + 1, add);
-    if (ctx.cfg.enable_fence && ctx.projectDir) fenceSegment(sub, ctx, depth + 1, add);
+    if (ctx.cfg.enable_danger_gate) gateSegment(sub, ctx, depth + 1, add, cwd);
+    if (ctx.cfg.enable_fence && ctx.projectDir) fenceSegment(sub, ctx, depth + 1, add, cwd);
   }
 }
 
@@ -749,12 +868,18 @@ const DEST_FLAG = {
   'invoke-webrequest': ['-outfile'], iwr: ['-outfile'],
 };
 
-function judgeWriteTarget(rawTok, ctx, cmdLabel) {
-  const info = normalizePath(rawTok, ctx.npBash);
+function judgeWriteTarget(rawTok, ctx, cmdLabel, cwd) {
+  let info = normalizePath(rawTok, ctx.npBash);
   if (info.kind === 'empty') return null;
   // 未定义变量（如 Unix 上的 %USERPROFILE%）→ 无法判定归属，宁可多问一句
   if (info.kind === 'unresolved' || info.unresolved) {
     return '[' + PLUGIN_ID + ': 路径无法解析] ' + rawTok + ' 含未定义变量，无法判定归属，请改用明确路径';
+  }
+  if (info.kind === 'relative') {
+    // 相对目标按命令内 cwd 解析；cwd 未知 → fail-open（与既有相对路径口径一致）
+    const resolved = resolveAgainstCwd(info, cwd, ctx);
+    if (!resolved) return null;
+    info = resolved;
   }
   if (info.kind === 'null' || info.kind === 'relative') return null;
   if (!ctx.roots || !ctx.roots.length) return null; // ZCODE_PROJECT_DIR 缺失 → 围栏降级
@@ -765,7 +890,7 @@ function judgeWriteTarget(rawTok, ctx, cmdLabel) {
   return null;
 }
 
-function fenceSegment(seg, ctx, depth, add) {
+function fenceSegment(seg, ctx, depth, add, cwd) {
   if (depth > MAX_DEPTH) return;
   const targets = [];
   for (const t of extractRedirects(seg)) targets.push(t); // 重定向目标永远判
@@ -776,7 +901,8 @@ function fenceSegment(seg, ctx, depth, add) {
     const name = pc.name;
     const args = pc.args;
     if (WRITE_ALL.has(name)) {
-      for (const t of extractPathTokens(seg)) targets.push(t);
+      // 只取内层命令的操作数：包装器选项（env -C /tmp）不是写目标
+      for (const t of operandTokens(args)) targets.push(t);
     } else if (WRITE_LAST.has(name)) {
       // 只判目标位（cp 的源不拦）；末参数形如开关（-x、/x 单字母）时不当作目标
       if (args.length) {
@@ -799,7 +925,7 @@ function fenceSegment(seg, ctx, depth, add) {
     }
     if (name === 'powershell' || name === 'pwsh') {
       const payload = psPayloadOf(args);
-      if (payload) psJudge(payload, ctx, depth, add); // gate 关闭时围栏侧也兜底判一次
+      if (payload) psJudge(payload, ctx, depth, add, cwd); // gate 关闭时围栏侧也兜底判一次
       return;
     }
     // 解释器内嵌脚本：写 API 与路径字面量共现才判（gate 关闭时围栏侧也兜底判一次）。
@@ -810,7 +936,7 @@ function fenceSegment(seg, ctx, depth, add) {
     } else {
       const inner = unwrapWrapper(name, args);
       if (inner != null) {
-        judgeCommand(inner, ctx, depth + 1, add);
+        judgeCommand(inner, ctx, depth + 1, add, cwd);
         return;
       }
     }
@@ -818,7 +944,7 @@ function fenceSegment(seg, ctx, depth, add) {
 
   for (const t of targets) {
     const label = pc ? pc.name : '重定向';
-    const r = judgeWriteTarget(t, ctx, label);
+    const r = judgeWriteTarget(t, ctx, label, cwd);
     if (r) add(r);
   }
 }
@@ -830,10 +956,41 @@ function fenceSegment(seg, ctx, depth, add) {
 // 命令替换载荷：$(…) 与 `…`（单层提取；嵌套由递归 depth 兜底，不平衡场景 fail-open）
 const RE_CMDSUB = /\$\(([^()]{1,2000})\)|`([^`]{1,2000})`/g;
 
-function judgeCommand(cmd, ctx, depth, add) {
+// 命令内 cd / pushd / popd 状态：同一段命令里的后续段按更新后的 cwd 解析相对路径
+function cdTargetOf(pc) {
+  if (pc.name === 'popd') return { op: 'pop' };
+  const target = operandTokens(pc.args)[0] || '';
+  if (pc.name === 'pushd') {
+    if (!target || /^[+-]\d+$/.test(target)) return { op: 'unknown' }; // 栈交换无法静态跟踪
+    return { op: 'push', target };
+  }
+  if (!target) return { op: 'set', target: '~' }; // 裸 cd 回 home
+  if (target === '-') return { op: 'unknown' };   // cd - 回上一个目录，无法静态跟踪
+  return { op: 'set', target };
+}
+
+function applyCd(pc, ctx, state) {
+  if (pc.name !== 'cd' && pc.name !== 'pushd' && pc.name !== 'popd') return;
+  const c = cdTargetOf(pc);
+  if (c.op === 'pop') { state.cwd = state.stack.length ? state.stack.pop() : null; return; }
+  if (c.op === 'unknown') { state.cwd = null; return; }
+  if (c.op === 'push') state.stack.push(state.cwd);
+  const info = normalizePath(c.target, ctx.npBash);
+  if (info.kind === 'relative') {
+    const r = resolveAgainstCwd(info, state.cwd, ctx);
+    state.cwd = r ? r.norm : null;
+  } else if (info.kind === 'drive' || info.kind === 'unix' || info.kind === 'unc') {
+    state.cwd = info.norm;
+  } else {
+    state.cwd = null;
+  }
+}
+
+function judgeCommand(cmd, ctx, depth, add, cwd) {
   if (depth > MAX_DEPTH) return;
   const cmdStr = String(cmd == null ? '' : cmd);
   if (!cmdStr.trim()) return;
+  const state = { cwd: cwd === undefined ? (ctx.cwd || null) : cwd, stack: [] };
 
   // $()/反引号内嵌命令先行提取递归判定（echo $(rm -rf /)）；外层命令照常分段。
   // 先收集完再递归：RE_CMDSUB 是全局正则，边扫边递归会被子调用重置 lastIndex 造成死循环
@@ -844,7 +1001,7 @@ function judgeCommand(cmd, ctx, depth, add) {
     const body = m[1] != null ? m[1] : m[2];
     if (body && body.trim()) subs.push(body);
   }
-  for (const sub of subs) judgeCommand(sub, ctx, depth + 1, add);
+  for (const sub of subs) judgeCommand(sub, ctx, depth + 1, add, state.cwd);
 
   if (ctx.cfg.enable_danger_gate) {
     // 自定义规则（分号分隔的 JS 正则；编译失败跳过该段不崩溃）
@@ -862,8 +1019,10 @@ function judgeCommand(cmd, ctx, depth, add) {
   }
 
   for (const seg of splitSegments(cmdStr)) {
-    if (ctx.cfg.enable_danger_gate) gateSegment(seg, ctx, depth, add);
-    if (ctx.cfg.enable_fence && ctx.projectDir) fenceSegment(seg, ctx, depth, add);
+    const pc = parseCmd(tokenize(seg));
+    if (pc) applyCd(pc, ctx, state);
+    if (ctx.cfg.enable_danger_gate) gateSegment(seg, ctx, depth, add, state.cwd);
+    if (ctx.cfg.enable_fence && ctx.projectDir) fenceSegment(seg, ctx, depth, add, state.cwd);
   }
 }
 
@@ -1006,10 +1165,18 @@ function judgePayload(p, env) {
   const ti = (p && p.tool_input) || {};
   let detail = '';
 
+  // 宿主注入的当前目录（Bash 的持久 cwd）：命令内 cd 的起点，用于解析相对写目标。
+  // 只认载荷（--eval 调试不带 cwd → 相对路径保持 fail-open 放行，与 v1.3.x 一致）。
+  if (p && typeof p.cwd === 'string' && p.cwd) {
+    const ci = normalizePath(p.cwd, ctx.npFile);
+    if (ci.kind === 'drive' || ci.kind === 'unix' || ci.kind === 'unc') ctx.cwd = ci.norm;
+  }
+  ctx.cwd = ctx.cwd || null;
+
   if (/^bash$/i.test(tool)) {
     const cmd = typeof ti.command === 'string' ? ti.command : '';
     detail = cmd;
-    judgeCommand(cmd, ctx, 0, add);
+    judgeCommand(cmd, ctx, 0, add, ctx.cwd);
   } else {
     // 文件工具目标在 tool_input.file_path（兼容 path）
     const target = (typeof ti.file_path === 'string' && ti.file_path) ||

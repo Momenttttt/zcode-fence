@@ -79,6 +79,27 @@ t('命令首词：sudo/VAR=/路径/扩展名剥除', () => {
   assert.strictEqual(guard.parseCmd(['(cd', '/x']).name, 'cd');
 });
 
+console.log('== 包装器选项链 / 组合短开关 ==');
+t('包装器选项链后 dispatch 内层命令', () => {
+  const p = (c) => guard.parseCmd(guard.tokenize(c));
+  assert.strictEqual(p('sudo -u root rm -rf /').name, 'rm');
+  assert.strictEqual(p('sudo -nE -u root rm -rf /').name, 'rm');
+  assert.strictEqual(p('env -i rm -rf /').name, 'rm');
+  assert.strictEqual(p('env -C /tmp rm -rf x').name, 'rm');
+  assert.strictEqual(p('nice -n 10 rm -rf /').name, 'rm');
+  assert.strictEqual(p('nice -10 rm -rf /').name, 'rm');
+  assert.strictEqual(p('timeout -s KILL 10 rm -rf /').name, 'rm');
+  assert.strictEqual(p('stdbuf -o0 rm -rf /').name, 'rm');
+  assert.strictEqual(p('stdbuf -o 0 rm -rf /').name, 'rm');
+  assert.strictEqual(p('nohup rm -rf /').name, 'rm');
+  assert.strictEqual(p('time -p rm -rf /').name, 'rm');
+  assert.strictEqual(p('wsl -d Ubuntu rm -rf /').name, 'rm');
+});
+t('非包装器命令不受选项链影响', () => {
+  assert.strictEqual(guard.parseCmd(guard.tokenize('git -C repo status')).name, 'git');
+  assert.strictEqual(guard.parseCmd(guard.tokenize('echo rm -rf /')).name, 'echo');
+});
+
 console.log('== 路径 token / 重定向提取 ==');
 t('引号内的盘符路径可提取', () =>
   assert.ok(guard.extractPathTokens('echo x > "C:/Users/alice/Desktop/pwn.txt"').includes('C:/Users/alice/Desktop/pwn.txt')));
@@ -223,6 +244,34 @@ t('项目内写 → silent', () => {
 t('写 ZCode 项目记忆目录 → silent（默认白名单）', () => {
   const mem = [smokeEnv.HOME || smokeEnv.USERPROFILE, '.zcode', 'cli', 'memories', 'projects', 'demo', 'memory', 'note.md'].join('/');
   const r = guard.judgePayload({ tool_name: 'Write', tool_input: { file_path: mem } }, smokeEnv);
+  assert.strictEqual(r.reasons.length, 0);
+});
+
+console.log('== cd 状态与相对路径解析 ==');
+t('cd 到项目外后相对目标按 cwd 解析（危险门）', () => {
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: 'cd / && rm -rf etc' } }, smokeEnv);
+  assert.ok(r.reasons.some((x) => x.indexOf('危险命令') >= 0));
+});
+t('cd 到项目外后相对写入 → 越界（围栏）', () => {
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: 'cd C:/Users/alice && touch y' } }, smokeEnv);
+  assert.ok(r.reasons.some((x) => x.indexOf('越界写入') >= 0));
+});
+t('cd 进项目后相对删除保持沉默（零误报）', () => {
+  const cmd = 'cd "' + projDir + '" && rm -rf node_modules';
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv);
+  assert.strictEqual(r.reasons.length, 0);
+});
+t('初始 cwd 来自载荷：相对写入按 cwd 解析', () => {
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: 'touch out.txt' }, cwd: 'C:/Users/alice' }, smokeEnv);
+  assert.ok(r.reasons.some((x) => x.indexOf('越界写入') >= 0));
+});
+t('cwd 未知时相对写入保持 fail-open', () => {
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: 'touch out.txt' } }, smokeEnv);
+  assert.strictEqual(r.reasons.length, 0);
+});
+t('pushd/popd 栈跟踪：popd 回到项目内不误报', () => {
+  const cmd = 'cd "' + projDir + '" && pushd C:/Users/alice && popd && touch ok.txt';
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv);
   assert.strictEqual(r.reasons.length, 0);
 });
 
