@@ -539,6 +539,123 @@ function dangerTargetsOf(args, ctx, cwd) {
   return out;
 }
 
+/* ---- find：-delete / -exec 删除按查找根判定 ---- */
+
+const FIND_EXEC_DELETE = new Set(['rm', 'del', 'rd', 'rmdir', 'erase', 'shred', 'unlink', 'remove-item', 'ri']);
+const FIND_EXPR_START = new Set(['!', '(', ')', ',']);
+
+function findParts(args) {
+  const roots = [];
+  let i = 0;
+  for (; i < args.length; i++) {
+    const t = args[i];
+    if (t[0] === '-' || FIND_EXPR_START.has(t)) break;
+    roots.push(t);
+  }
+  return { roots: roots.length ? roots : ['.'], expr: args.slice(i) };
+}
+
+function findExecCommands(expr) {
+  const cmds = [];
+  for (let i = 0; i < expr.length; i++) {
+    if (expr[i] !== '-exec' && expr[i] !== '-execdir' && expr[i] !== '-ok' && expr[i] !== '-okdir') continue;
+    const sub = [];
+    for (let j = i + 1; j < expr.length; j++) {
+      const t = expr[j];
+      if (t === ';' || t === '\\;' || t === '+') break;
+      sub.push(t);
+    }
+    if (sub.length) cmds.push(sub);
+  }
+  return cmds;
+}
+
+function findJudge(args, ctx, depth, add, cwd) {
+  if (depth > MAX_DEPTH) return;
+  const parts = findParts(args);
+  const hasDelete = parts.expr.indexOf('-delete') >= 0;
+  const execs = findExecCommands(parts.expr);
+  const execDeletes = execs.filter((sub) => {
+    const pc = parseCmd(sub);
+    return pc && FIND_EXEC_DELETE.has(pc.name);
+  });
+  if (hasDelete || execDeletes.length) {
+    for (const root of parts.roots) {
+      if (ctx.cfg.enable_danger_gate) {
+        const info = resolveTarget(root, ctx, cwd);
+        if (info && isDangerTarget(info, ctx)) {
+          gateReason(add, 'find 的查找根 ' + info.norm + ' 是灾难级目录，表达式含删除', 'DG-FIND-DELETE');
+        }
+      }
+      if (ctx.cfg.enable_fence && ctx.projectDir) {
+        const r = judgeWriteTarget(root, ctx, 'find', cwd);
+        if (r) add(r);
+      }
+    }
+  }
+  // -exec 的内层命令照常递归判定（find . -exec rm -rf / \;）
+  for (const sub of execs) judgeCommand(sub.join(' '), ctx, depth + 1, add, cwd);
+}
+
+/* ---- xargs：子命令是删除/shell 时因输入动态而 ask ---- */
+
+const XARGS_VALUE_OPTS = new Set(['-I', '-n', '-P', '-L', '-l', '-s', '-E', '-e', '-d', '-a',
+  '--delimiter', '--max-args', '--max-procs', '--max-lines', '--max-chars', '--arg-file',
+  '--eof', '--replace', '--process-slot-var']);
+const DYNAMIC_DELETE = new Set(['rm', 'del', 'rd', 'rmdir', 'erase', 'shred', 'unlink', 'remove-item', 'ri']);
+
+function xargsCommandOf(args) {
+  let i = 0;
+  for (; i < args.length; i++) {
+    const t = args[i];
+    if (t === '--') { i++; break; }
+    if (t[0] !== '-') break;
+    if (t.length === 2 && XARGS_VALUE_OPTS.has(t)) i++;
+  }
+  return parseCmd(args.slice(i));
+}
+
+/* ---- sed -i：文件操作数按写目标判 ---- */
+
+function sedWriteFiles(args) {
+  let inPlace = false;
+  let scriptSeen = false;
+  let skipNext = false;
+  const files = [];
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i];
+    if (skipNext) { skipNext = false; scriptSeen = true; continue; }
+    if (t === '--') {
+      for (const f of args.slice(i + 1)) if (f[0] !== '-') files.push(f);
+      break;
+    }
+    if (t === '-i' || t === '--in-place' || t.indexOf('--in-place=') === 0 || /^-i./.test(t)) {
+      inPlace = true; continue;
+    }
+    if (/^-[A-Za-z]*i[A-Za-z]*$/.test(t)) { inPlace = true; continue; } // 组合短开关 -ni
+    if (t === '-e' || t === '--expression' || t === '-f' || t === '--file') { skipNext = true; continue; }
+    if (t[0] === '-' && t.length > 1) continue; // 其他开关（保守跳过）
+    if (!scriptSeen) { scriptSeen = true; continue; } // 第一个非选项是脚本
+    files.push(t);
+  }
+  return inPlace ? files : [];
+}
+
+function sedJudge(args, ctx, add, cwd) {
+  for (const f of sedWriteFiles(args)) {
+    if (ctx.cfg.enable_danger_gate) {
+      const info = resolveTarget(f, ctx, cwd);
+      if (info && isDangerTarget(info, ctx)) {
+        gateReason(add, 'sed -i 就地编辑灾难级目标 ' + info.norm, 'DG-SED-INPLACE');
+      }
+    }
+    if (ctx.cfg.enable_fence && ctx.projectDir) {
+      const r = judgeWriteTarget(f, ctx, 'sed -i', cwd);
+      if (r) add(r);
+    }
+  }
+}
+
 function gateReason(add, label, rule) {
   add('[' + PLUGIN_ID + ': 危险命令] ' + label + '（规则 ' + rule + '）');
 }
@@ -657,16 +774,36 @@ function gateSegment(seg, ctx, depth, add, cwd) {
     gateReason(add, 'diskpart 磁盘分区工具', 'DG-DISKPART');
     return;
   }
+  if (name === 'find') {
+    findJudge(args, ctx, depth, add, cwd);
+    return;
+  }
+  if (name === 'xargs') {
+    const sub = xargsCommandOf(args);
+    if (sub) {
+      if (DYNAMIC_DELETE.has(sub.name)) {
+        gateReason(add, 'xargs 把动态输入交给删除命令 ' + sub.name + '，目标无法静态确认', 'DG-XARGS-DELETE');
+      } else if (SHELLS.has(sub.name) || sub.name === 'cmd' || sub.name === 'powershell' ||
+                 sub.name === 'pwsh' || sub.name === 'eval') {
+        gateReason(add, 'xargs 把动态输入交给 shell 执行', 'DG-XARGS-SHELL');
+      }
+    }
+    return;
+  }
+  if (name === 'sed' || name === 'gsed') {
+    sedJudge(args, ctx, add, cwd);
+    return;
+  }
   // ---- 包装器 ----
   if (name === 'powershell' || name === 'pwsh') {
     const payload = psPayloadOf(args);
     if (payload) psJudge(payload, ctx, depth, add, cwd);
     return;
   }
-  // ---- 解释器内嵌脚本（node -e / python -c / perl -e / ruby -e）----
+  // ---- 解释器内嵌脚本（node -e / python -c / perl -e / ruby -e / php -r / awk …）----
   const script = scriptPayloadOf(name, args);
   if (script != null) {
-    scriptJudge(script, ctx, add, name);
+    interpreterJudge(name, script, ctx, depth, add, cwd);
     return;
   }
   const inner = unwrapWrapper(name, args);
@@ -757,17 +894,37 @@ function psJudge(payload, ctx, depth, add, cwd) {
  * 与 powershell -EncodedCommand 同态度：文档化盲区。
  * ================================================================ */
 
-// 内嵌脚本开关（node 的 -p/--print 同样执行 JS）；perl/ruby 允许多次 -e 拼接
+// 内嵌脚本开关（node 的 -p/--print 同样执行 JS）；perl/ruby/php 允许多次 -e/-r 拼接
 const SCRIPT_RUNNERS = {
   node: ['-e', '--eval', '-p', '--print'],
   nodejs: ['-e', '--eval', '-p', '--print'],
+  bun: ['-e', '--eval', '-p', '--print'],
   python: ['-c'], python3: ['-c'], python2: ['-c'],
   perl: ['-e'],
   ruby: ['-e'],
+  php: ['-r'],
+  osascript: ['-e'],
 };
+const AWK_NAMES = new Set(['awk', 'gawk', 'mawk', 'nawk']);
 
 // -e/-c 紧随其后的一个参数是脚本本体；返回拼接载荷，非解释器返回 null
 function scriptPayloadOf(name, args) {
+  // deno eval <code>：子命令形态，代码在其后
+  if (name === 'deno') {
+    const i = args.findIndex((t) => t === 'eval');
+    return i >= 0 && i + 1 < args.length ? args.slice(i + 1).join(' ') : null;
+  }
+  // awk 的程序是第一个非选项参数（-f 脚本文件属文档化盲区）
+  if (AWK_NAMES.has(name)) {
+    for (let i = 0; i < args.length; i++) {
+      const t = args[i];
+      if (t === '-f' || t === '--file') return null;
+      if (t === '-v' || t === '--assign') { i++; continue; }
+      if (t[0] === '-' && t.length > 1) continue;
+      return t;
+    }
+    return null;
+  }
   const switches = SCRIPT_RUNNERS[name];
   if (!switches) return null;
   const parts = [];
@@ -777,6 +934,114 @@ function scriptPayloadOf(name, args) {
     }
   }
   return parts.length ? parts.join('\n') : null;
+}
+
+/* ---- 解释器 shell 执行载荷（system/exec/child_process/os.system/反引号…） ----
+ * 只对「执行子进程」的 API 提取字符串参数并递归按 shell 命令判；
+ * 纯读/纯计算载荷没有这些调用，保持沉默。
+ */
+
+const SHELL_EXEC_RES = {
+  js: [
+    /\bchild_process\s*\.\s*(?:exec|execSync|spawn|spawnSync|execFile|execFileSync|fork)\s*\(/gi,
+    /\brequire\s*\(\s*['"]child_process['"]\s*\)\s*\.\s*\w+\s*\(/gi,
+    /\b(?:execSync|execFileSync)\s*\(/g,
+    /\bBun\s*\.\s*(?:spawn|spawnSync)\s*\(/gi,
+    /\bDeno\s*\.\s*(?:Command|run)\s*\(/gi,
+  ],
+  python: [
+    /\bos\s*\.\s*(?:system|popen|exec\w*|spawn\w*)\s*\(/gi,
+    /\bsubprocess\s*\.\s*(?:run|call|Popen|check_output|check_call|getoutput|getstatusoutput)\s*\(/gi,
+  ],
+  perl: [/\b(?:system|exec|qx)\s*\(/gi],
+  ruby: [/\b(?:system|exec|spawn)\s*\(/gi],
+  php: [/\b(?:system|exec|shell_exec|passthru|popen|proc_open)\s*\(/gi],
+  awk: [/\bsystem\s*\(/gi],
+  osascript: [/\bdo\s+shell\s+script\b/gi],
+};
+
+// 读取起点处的字符串字面量（单/双/反引号），支持反斜杠转义
+function readQuotedAt(s, i) {
+  while (i < s.length && /\s/.test(s[i])) i++;
+  const q = s[i];
+  if (q !== '"' && q !== "'" && q !== '`') return null;
+  let j = i + 1;
+  let out = '';
+  while (j < s.length) {
+    const ch = s[j];
+    if (ch === '\\' && j + 1 < s.length) {
+      const nx = s[j + 1];
+      if (nx === q || nx === '\\') out += nx;
+      else out += ch + nx;
+      j += 2;
+      continue;
+    }
+    if (ch === q) return { value: out, end: j + 1 };
+    out += ch;
+    j++;
+  }
+  return null;
+}
+
+// 读取调用第一个参数：字符串，或字符串数组（subprocess.run(["rm","-rf","/"])）
+function readArgStringAt(s, i) {
+  while (i < s.length && /\s/.test(s[i])) i++;
+  if (s[i] === '[') {
+    let j = i + 1;
+    const parts = [];
+    while (j < s.length && s[j] !== ']') {
+      while (j < s.length && /[\s,]/.test(s[j])) j++;
+      if (s[j] === ']') break;
+      const got = readQuotedAt(s, j);
+      if (!got) return null;
+      parts.push(got.value);
+      j = got.end;
+    }
+    return parts.length ? { value: parts.join(' '), end: j + 1 } : null;
+  }
+  return readQuotedAt(s, i);
+}
+
+function shellPayloadsOf(name, payload) {
+  if (!payload) return [];
+  const groups = [];
+  if (name === 'node' || name === 'nodejs' || name === 'bun' || name === 'deno') groups.push(SHELL_EXEC_RES.js);
+  else if (/^python/.test(name)) groups.push(SHELL_EXEC_RES.python);
+  else if (name === 'perl') groups.push(SHELL_EXEC_RES.perl);
+  else if (name === 'ruby') groups.push(SHELL_EXEC_RES.ruby);
+  else if (name === 'php') groups.push(SHELL_EXEC_RES.php);
+  else if (AWK_NAMES.has(name)) groups.push(SHELL_EXEC_RES.awk);
+  else if (name === 'osascript') groups.push(SHELL_EXEC_RES.osascript);
+  const out = [];
+  const seen = new Set();
+  const push = (v) => { if (v && v.trim() && !seen.has(v)) { seen.add(v); out.push(v); } };
+  for (const res of groups) {
+    for (const re of res) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(payload)) !== null) {
+        const got = readArgStringAt(payload, m.index + m[0].length);
+        if (got) push(got.value);
+        if (re.lastIndex === m.index) re.lastIndex++; // 空匹配防死循环
+      }
+    }
+  }
+  // perl/ruby/php 的反引号载荷
+  if (name === 'perl' || name === 'ruby' || name === 'php') {
+    const re = /`([^`]+)`/g;
+    let m;
+    while ((m = re.exec(payload)) !== null) push(m[1]);
+  }
+  return out;
+}
+
+// 解释器载荷：写 API 路径判定 + shell 执行载荷递归（两侧开关各自内部自查）
+function interpreterJudge(name, payload, ctx, depth, add, cwd) {
+  if (!payload) return;
+  scriptJudge(payload, ctx, add, name);
+  for (const p of shellPayloadsOf(name, payload)) {
+    judgeCommand(p, ctx, depth + 1, add, cwd);
+  }
 }
 
 // 载荷内写 API 形态（调用式，词边界 + 左括号防 from()/normal( 子串误配；
@@ -804,6 +1069,15 @@ const SCRIPT_WRITE_RES = [
   /\bfileutils\s*\.\s*(rm\w*|mv\w*|cp\w*|install)\b/i,
   // Perl：双参 open 的写模式（'>'、'>>'、'+<'；纯读 '<' 排除）
   /\bopen\s*\(\s*[\w:]+\s*,\s*['"][+>]/i,
+  // Perl：无括号 unlink "path" 形态
+  /\bunlink\s+['"\/~$%]/i,
+  // PHP：写文件 / 删除 / 改名 / 建目录（php -r 载荷）
+  /\bfile_put_contents\s*\(/i,
+  /\bfwrite\s*\(/i,
+  /\bfopen\s*\([^)]*['"][wax+][a-z+]*['"]/i,
+  /\bcopy\s*\(/i,
+  // Deno：删除 / 写入 / 建目录（deno eval 载荷）
+  /\bdeno\s*\.\s*(remove|removeSync|writeTextFile|writeTextFileSync|writeFile|writeFileSync|mkdir|mkdirSync|rename|renameSync|copyFile|copyFileSync)\s*\(/i,
 ];
 
 // 写 API 与绝对路径字面量共现 → 路径按写目标判（危险门 + 围栏两侧自查开关，
@@ -928,11 +1202,19 @@ function fenceSegment(seg, ctx, depth, add, cwd) {
       if (payload) psJudge(payload, ctx, depth, add, cwd); // gate 关闭时围栏侧也兜底判一次
       return;
     }
+    if (name === 'find') {
+      findJudge(args, ctx, depth, add, cwd); // gate 关闭时围栏侧也兜底判根
+      return;
+    }
+    if (name === 'sed' || name === 'gsed') {
+      sedJudge(args, ctx, add, cwd);
+      return;
+    }
     // 解释器内嵌脚本：写 API 与路径字面量共现才判（gate 关闭时围栏侧也兜底判一次）。
     // 不提前 return：外层重定向目标（node -e "..." > 界外路径）照常落到尾部判定
     const script = scriptPayloadOf(name, args);
     if (script != null) {
-      scriptJudge(script, ctx, add, name);
+      interpreterJudge(name, script, ctx, depth, add, cwd);
     } else {
       const inner = unwrapWrapper(name, args);
       if (inner != null) {

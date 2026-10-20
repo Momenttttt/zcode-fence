@@ -275,6 +275,37 @@ t('pushd/popd 栈跟踪：popd 回到项目内不误报', () => {
   assert.strictEqual(r.reasons.length, 0);
 });
 
+console.log('== find / xargs / sed ==');
+t('find -delete 按根判定：灾难级/项目外 ask，项目内 silent', () => {
+  const ask = (c) => guard.judgePayload({ tool_name: 'Bash', tool_input: { command: c } }, smokeEnv).reasons;
+  assert.ok(ask('find / -delete').some((x) => x.indexOf('危险命令') >= 0));
+  assert.ok(ask('find C:/Users/alice -delete').some((x) => x.indexOf('越界写入') >= 0));
+  assert.strictEqual(ask('find "' + projDir + '" -name "*.tmp" -delete').length, 0);
+  assert.strictEqual(ask('find . -delete').length, 0); // --eval 无 cwd → fail-open
+});
+t('find -exec 删除按根判定，内层命令递归判', () => {
+  const ask = (c) => guard.judgePayload({ tool_name: 'Bash', tool_input: { command: c } }, smokeEnv).reasons;
+  assert.ok(ask('find / -exec rm -rf {} +').length > 0);
+  assert.ok(ask('find . -exec rm -rf / \;').some((x) => x.indexOf('危险命令') >= 0));
+  assert.strictEqual(ask('find . -exec echo {} \;').length, 0);
+});
+t('xargs 删除/shell 子命令 ask，无害子命令 silent', () => {
+  const ask = (c) => guard.judgePayload({ tool_name: 'Bash', tool_input: { command: c } }, smokeEnv).reasons;
+  assert.ok(ask('xargs rm -rf').length > 0);
+  assert.ok(ask('xargs -0 rm').length > 0);
+  assert.ok(ask('xargs -n 1 sh -c "echo x"').length > 0);
+  assert.strictEqual(ask('xargs echo hi').length, 0);
+});
+t('sed -i 文件操作数按写目标判', () => {
+  const ask = (c) => guard.judgePayload({ tool_name: 'Bash', tool_input: { command: c } }, smokeEnv).reasons;
+  assert.ok(ask("sed -i 's/x/y/' /etc/passwd").length > 0);
+  assert.ok(ask("sed --in-place 's/x/y/' /etc/passwd").length > 0);
+  assert.ok(ask("sed -i.bak 's/x/y/' /etc/passwd").length > 0);
+  assert.strictEqual(ask("sed -n 's/x/y/p' /etc/passwd").length, 0);
+  const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: "sed -i 's/x/y/' src/a.js" }, cwd: projDir }, smokeEnv);
+  assert.strictEqual(r.reasons.length, 0);
+});
+
 console.log('== 解释器内嵌脚本载荷（node -e / python -c / perl -e / ruby -e）==');
 t('scriptPayloadOf：node -e 提取紧随其后的脚本', () =>
   assert.strictEqual(guard.scriptPayloadOf('node', ['-e', 'code()']), 'code()'));
@@ -330,6 +361,29 @@ t('越界理由披露当前项目根（工作区错位可诊断）', () => {
   assert.ok(rb.reasons.some((x) => x.indexOf('项目根 ' + projReal) >= 0));
   const rf = guard.judgePayload({ tool_name: 'Write', tool_input: { file_path: 'C:/Users/outside/pwn.txt' } }, smokeEnv);
   assert.ok(rf.reasons.some((x) => x.indexOf('项目根 ' + projReal) >= 0));
+});
+
+console.log('== 解释器 shell 执行载荷 ==');
+const shellAsk = (cmd) => guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv).reasons;
+t('child_process / os.system / subprocess / system() 载荷递归判定', () => {
+  assert.ok(shellAsk(`node -e 'require("child_process").execSync("rm -rf /")'`).some((x) => x.indexOf('危险命令') >= 0));
+  assert.ok(shellAsk(`python -c 'import os; os.system("rm -rf /")'`).some((x) => x.indexOf('危险命令') >= 0));
+  assert.ok(shellAsk(`python -c 'import subprocess; subprocess.run(["rm","-rf","/"])'`).some((x) => x.indexOf('危险命令') >= 0));
+  assert.ok(shellAsk(`perl -e 'system("rm -rf /")'`).some((x) => x.indexOf('危险命令') >= 0));
+  assert.ok(shellAsk(`php -r 'system("rm -rf /");'`).some((x) => x.indexOf('危险命令') >= 0));
+  assert.ok(shellAsk(`awk 'BEGIN{system("rm -rf /")}'`).some((x) => x.indexOf('危险命令') >= 0));
+  assert.ok(shellAsk(`osascript -e 'do shell script "rm -rf /"'`).some((x) => x.indexOf('危险命令') >= 0));
+});
+t('解释器载荷纯读/纯计算/正则文本保持 silent', () => {
+  assert.strictEqual(shellAsk(`node -e "console.log(require('fs').readFileSync('C:/Windows/win.ini','utf8'))"`).length, 0);
+  assert.strictEqual(shellAsk(`node -e "const m=/x/.exec('rm -rf /')"`).length, 0);
+  assert.strictEqual(shellAsk(`python -c "import json; print(json.load(open(r'C:/Users/x/a.json')))"`).length, 0);
+  assert.strictEqual(shellAsk("awk '{print $1}'").length, 0);
+});
+t('perl unlink / deno remove / php file_put_contents 写目标进围栏', () => {
+  assert.ok(shellAsk(`perl -e 'unlink "/etc/passwd"'`).some((x) => x.indexOf('越界写入') >= 0));
+  assert.ok(shellAsk(`deno eval 'Deno.remove("/etc/passwd")'`).some((x) => x.indexOf('越界写入') >= 0));
+  assert.ok(shellAsk(`php -r 'file_put_contents("/etc/passwd","x");'`).some((x) => x.indexOf('越界写入') >= 0));
 });
 
 console.log('== 会话根锁定（session-roots.log 状态外置）==');
