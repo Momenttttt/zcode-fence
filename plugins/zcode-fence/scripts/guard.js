@@ -310,6 +310,41 @@ function splitSegments(cmd) {
   return segs.map((t) => t.trim()).filter(Boolean);
 }
 
+// 与 splitSegments 同规则，但保留每段前的分隔符（识别「下载器 | shell」管道）
+function splitSegmentsWithOps(cmd) {
+  const out = [];
+  let cur = '';
+  let quote = null;
+  let op = '';
+  const s = String(cmd == null ? '' : cmd);
+  const flush = (nextOp) => {
+    const seg = cur.trim();
+    if (seg) out.push({ seg, op });
+    cur = '';
+    op = nextOp;
+  };
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"' && i + 1 < s.length) { cur += ch + s[i + 1]; i++; continue; }
+      if (ch === quote) quote = null;
+      cur += ch;
+      continue;
+    }
+    if (ch === '\\') { cur += ch + (s[i + 1] || ''); i++; continue; }
+    if (ch === "'" || ch === '"' || ch === '`') { quote = ch; cur += ch; continue; }
+    if (ch === ';' || ch === '|' || ch === '&' || ch === '\n' || ch === '\r') {
+      let sep = ch;
+      if ((ch === '|' || ch === '&') && s[i + 1] === ch) { sep = ch + ch; i++; }
+      flush(sep);
+      continue;
+    }
+    cur += ch;
+  }
+  flush('');
+  return out;
+}
+
 // 空白分词，剥除引号（引号内的路径 token 也要能提取 —— 修复引号穿透）
 function tokenize(seg) {
   const toks = [];
@@ -656,6 +691,25 @@ function sedJudge(args, ctx, add, cwd) {
   }
 }
 
+/* ---- chmod / chown / chgrp：所有路径操作数进入写目标判定 ---- */
+
+function metaOperands(name, args) {
+  const out = [];
+  let ownerSkipped = false;
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i];
+    if (t === '--') { for (const f of args.slice(i + 1)) out.push(f); break; }
+    if (t[0] === '-' && t.length > 1) continue;                      // 开关（含 --reference=）
+    if (/^[0-7]{3,4}$/.test(t)) continue;                            // chmod 数字模式
+    if (/^[ugoa]*[+-=][rwxXst]*$/.test(t)) continue;                 // chmod 符号模式
+    if (name === 'chown' || name === 'chgrp') {
+      if (!ownerSkipped) { ownerSkipped = true; continue; }          // 第一个操作数是 owner/group
+    }
+    out.push(t);
+  }
+  return out;
+}
+
 function gateReason(add, label, rule) {
   add('[' + PLUGIN_ID + ': 危险命令] ' + label + '（规则 ' + rule + '）');
 }
@@ -774,6 +828,27 @@ function gateSegment(seg, ctx, depth, add, cwd) {
     gateReason(add, 'diskpart 磁盘分区工具', 'DG-DISKPART');
     return;
   }
+  if (name === 'mount') {
+    if (!args.length || args.some((a) => a === '-l' || a === '--list' || a === '--help' || a === '-h')) return;
+    gateReason(add, 'mount 挂载/重挂载文件系统', 'DG-MOUNT');
+    return;
+  }
+  if (name === 'umount' || name === 'unmount') {
+    if (!args.length || args.some((a) => a === '--help' || a === '-h')) return;
+    gateReason(add, 'umount 卸载文件系统', 'DG-UMOUNT');
+    return;
+  }
+  if (name === 'fdisk') {
+    if (args.some((a) => /^-[A-Za-z]*l/.test(a) || a === '--list' || a === '--help' || a === '-h')) return;
+    gateReason(add, 'fdisk 分区表操作', 'DG-FDISK');
+    return;
+  }
+  if (name === 'parted') {
+    if (!args.length || args.some((a) => a === 'print' || a === '-l' || a === '--list' ||
+        a === '--help' || a === '-h')) return;
+    gateReason(add, 'parted 分区表操作', 'DG-PARTED');
+    return;
+  }
   if (name === 'find') {
     findJudge(args, ctx, depth, add, cwd);
     return;
@@ -851,6 +926,41 @@ function shellDashCOf(args) {
         t === '--rcfile' || t === '--init-file') i++; // 带独立值的开关跳过其值
   }
   return null;
+}
+
+/* ---- 远程代码执行形态（下载器 → shell / 进程替换 / eval） ---- */
+
+const DOWNLOADERS = new Set(['curl', 'wget', 'aria2c', 'fetch']);
+const STDIN_INTERPRETERS = new Set(['python', 'python2', 'python3', 'perl', 'ruby', 'node', 'nodejs', 'php']);
+const RE_RCE_SUBST = /\b(?:bash|sh|zsh|dash|ksh|ash|source)\s+<\(\s*(?:curl|wget|aria2c|fetch)\b/;
+const RE_RCE_DOT_SUBST = /(?:^|[\s;&|])\.\s+<\(\s*(?:curl|wget|aria2c|fetch)\b/;
+const RE_RCE_EVAL = /\beval\s+["']?\$\(\s*(?:curl|wget|aria2c|fetch)\b/;
+
+// 管道下游是否「直接执行 stdin」的 shell/解释器（bash -n 等语法检查形态放行）
+function shellFromStdin(pc) {
+  if (!pc) return false;
+  if (SHELLS.has(pc.name)) {
+    if (!pc.args.length) return true;
+    const first = pc.args[0].toLowerCase();
+    return first === '-s' || first === '--stdin';
+  }
+  if (STDIN_INTERPRETERS.has(pc.name)) {
+    return !pc.args.length || pc.args[0] === '-' || pc.args[0] === '/dev/stdin';
+  }
+  return false;
+}
+
+function rceJudge(cmdStr, add) {
+  if (RE_RCE_SUBST.test(cmdStr) || RE_RCE_DOT_SUBST.test(cmdStr)) {
+    gateReason(add, '进程替换把下载内容直接交给 shell 执行', 'DG-RCE-SUBST');
+  }
+  if (RE_RCE_EVAL.test(cmdStr)) {
+    gateReason(add, 'eval 直接执行下载内容', 'DG-RCE-EVAL');
+  }
+}
+
+function isDownloaderCmd(pc) {
+  return !!pc && DOWNLOADERS.has(pc.name);
 }
 
 // cmd /c、bash -c、wsl 等包装器解包；返回内层命令字符串，非包装器返回 null
@@ -1177,6 +1287,11 @@ function fenceSegment(seg, ctx, depth, add, cwd) {
     if (WRITE_ALL.has(name)) {
       // 只取内层命令的操作数：包装器选项（env -C /tmp）不是写目标
       for (const t of operandTokens(args)) targets.push(t);
+    } else if (name === 'mv' || name === 'move') {
+      // mv 同时判源和目标（移动=源删除+目标写入）；cp 仍只判目标
+      for (const t of operandTokens(args)) targets.push(t);
+    } else if (name === 'chmod' || name === 'chown' || name === 'chgrp') {
+      for (const t of metaOperands(name, args)) targets.push(t);
     } else if (WRITE_LAST.has(name)) {
       // 只判目标位（cp 的源不拦）；末参数形如开关（-x、/x 单字母）时不当作目标
       if (args.length) {
@@ -1187,7 +1302,11 @@ function fenceSegment(seg, ctx, depth, add, cwd) {
     const flags = DEST_FLAG[name];
     if (flags) {
       for (let i = 0; i < args.length; i++) {
-        if (flags.indexOf(args[i].toLowerCase()) >= 0 && i + 1 < args.length) targets.push(args[i + 1]);
+        const low = args[i].toLowerCase();
+        if (flags.indexOf(low) >= 0 && i + 1 < args.length) targets.push(args[i + 1]);
+        for (const f of flags) {
+          if (f.slice(0, 2) === '--' && low.indexOf(f + '=') === 0) targets.push(args[i].slice(f.length + 1));
+        }
         if ((name === '7z' || name === '7za') && /^-o/i.test(args[i]) && args[i].length > 2) {
           targets.push(args[i].slice(2)); // 7z 的 -oC:\out 附着形式
         }
@@ -1298,13 +1417,26 @@ function judgeCommand(cmd, ctx, depth, add, cwd) {
     if (RE_FORK.test(cmdStr)) {
       add('[' + PLUGIN_ID + ': 危险命令] 检测到 fork 炸弹（规则 DG-FORK-BOMB）');
     }
+    rceJudge(cmdStr, add);
   }
 
-  for (const seg of splitSegments(cmdStr)) {
+  let prevPc = null;
+  let pipeTainted = false; // 同一管道链里出现过下载器
+  for (const part of splitSegmentsWithOps(cmdStr)) {
+    const seg = part.seg;
     const pc = parseCmd(tokenize(seg));
+    if (part.op === '|') {
+      if (isDownloaderCmd(prevPc)) pipeTainted = true;
+      if (pipeTainted && shellFromStdin(pc) && ctx.cfg.enable_danger_gate) {
+        gateReason(add, '下载内容直接管道给 ' + pc.name + ' 执行', 'DG-RCE-PIPE');
+      }
+    } else {
+      pipeTainted = false;
+    }
     if (pc) applyCd(pc, ctx, state);
     if (ctx.cfg.enable_danger_gate) gateSegment(seg, ctx, depth, add, state.cwd);
     if (ctx.cfg.enable_fence && ctx.projectDir) fenceSegment(seg, ctx, depth, add, state.cwd);
+    prevPc = pc;
   }
 }
 
