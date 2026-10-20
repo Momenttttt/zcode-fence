@@ -1,28 +1,66 @@
 ---
 name: zcode-fence
-description: 收到 [zcode-fence: ...] 拦截标记时的正确响应方式：改用项目内/临时目录路径，或请求用户批准，绝不原样重试、绝不尝试绕过插件。
+description: How to respond when a permission prompt contains a [zcode-fence: ...] marker — switch to an in-project or temp path, or ask the user to approve. Never retry the same call verbatim and never try to bypass the plugin.
 ---
 
-# zcode-fence 拦截标记响应指南
+# Responding to zcode-fence markers
 
-当你在 Bash/Write/Edit/ApplyPatch 的权限确认原因里看到 `[zcode-fence: ...]` 前缀，说明该操作被确定性围栏规则命中。标记有三类：
+When a Bash/Write/Edit/ApplyPatch permission prompt contains a reason starting with
+`[zcode-fence: ...]`, a deterministic fence rule (or the optional decision-model layer)
+flagged the call. The plugin is ask-only: it never allows or denies, it only forces a
+confirmation dialog. The user sees the same reason text you do.
 
-- `[zcode-fence: 危险命令]`：命令被判定为灾难级（递归删根/盘符根/home、抹盘、格式化、fork 炸弹等）。
-- `[zcode-fence: 越界写入]`：写入目标（文件工具目标、重定向目标、cp/mv/tar 等的目的地）位于项目根与临时目录等可写根之外。
-- `[zcode-fence: 路径无法解析]`：目标含未定义的变量（如 `%NOPE%\x`），无法判定归属。
+There are five marker categories:
 
-## 正确做法
+- `[zcode-fence: 危险命令]` — the command can cause catastrophic or irreversible loss:
+  recursive deletes of roots/home/system directories, disk and partition operations,
+  format/wipes, power commands, remote code execution (`curl | bash`, `bash <(curl …)`,
+  `eval "$(curl …)"`), irreversible git operations (force/delete/mirror push,
+  `reset --hard`, `clean -fdx`, change-discarding checkout/restore, `stash clear/drop`,
+  `branch -D`, `tag -d`, …), system persistence changes (crontab, firewall, registry,
+  service enable/mask, scheduled tasks), and equivalent payloads hidden in wrappers,
+  interpreters, `find`/`xargs`/`sed`, or command substitution.
+- `[zcode-fence: 越界写入]` — the write target is outside the writable roots: project
+  root, the real temp directory, the ZCode project memory directory
+  (`~/.zcode/cli/memories`), and any user-configured extra roots. This includes
+  relative targets resolved against the command's current directory (`cd /path && …`),
+  `chmod`/`chown` operands, both sides of `mv`, `sed -i` files, `find` deletion roots,
+  and interpreter write payloads.
+- `[zcode-fence: 路径无法解析]` — the target contains an undefined variable (e.g.
+  `%NOPE%\x`), so its owner cannot be determined.
+- `[zcode-fence: 自定义规则]` — a user-configured regex matched the command text.
+- `[zcode-fence: 决策模型]` — the optional decision-model layer reviewed a call that all
+  deterministic rules passed, and recommends confirmation. The reason includes the
+  effect category (read-only, project write, git history, data deletion, system change,
+  external side effect, exfiltration) and a score.
 
-1. **危险命令**：几乎可以肯定这不是任务所需。向用户说明原命令与风险，改用精确、最小的操作（例如只删项目内的具体目录）。
-2. **越界写入**：按优先级从高到低尝试
-   - 改写到**项目内**路径；
-   - 临时产物改写到**临时目录**（Windows 为 `%TEMP%`，Git Bash 下 `/tmp`，Unix 为 `/tmp` 或 `$TMPDIR`）；
-   - 确实需要写项目外（如用户明确要求的备份位置）：保留原路径，向用户说明理由，由用户在确认框里批准。批准一次放行一次。
-3. **路径无法解析**：改用不含变量或变量已定义的明确路径。
+## What to do
 
-## 禁止事项
+1. **Danger / custom rule**: almost certainly not required by the task. Explain the
+   original command and its risk, then use the smallest precise operation instead (for
+   example, delete a specific directory inside the project rather than a parent path).
+2. **Out-of-bounds write**: prefer, in order:
+   - rewrite to a path **inside the project**;
+   - put temporary artifacts in the **temp directory** (`%TEMP%` on Windows, `/tmp` in
+     Git Bash, `/tmp` or `$TMPDIR` on Unix);
+   - if the user explicitly asked for an outside location, keep the path and explain
+     why — the user approves it in the dialog. Approval covers that one call.
+3. **Unresolvable path**: replace undefined variables with a concrete path.
+4. **Decision model**: treat it as a second opinion, not a hard block. Check the reported
+   effect category and score, then either switch to a routine in-project approach or
+   explain the intended effect to the user and let them decide.
+5. If a call is genuinely required as-is, ask the user to approve it. Do not loop on the
+   same call.
 
-- **不要原样重试**同一命令/路径，规则是确定性的，结果不会变。
-- 不要尝试停用/卸载本插件、修改其配置或决策日志来绕过拦截。
-- 不要用相对路径 + `cd` 出项目的方式规避围栏，那是文档化盲区，算规避行为，不是任务需要。
-- 不要因为一次拦截就放弃任务：换成合规路径通常就能继续。
+## Prohibited
+
+- Do not retry the same command or path verbatim — the rules are deterministic and the
+  verdict will not change.
+- Do not disable, uninstall, reconfigure, or edit the plugin, its manifest, or its
+  decision log to get around a marker.
+- Do not use `cd` into another directory to hide a relative write; in-command `cd` state
+  is tracked and out-of-bounds relative targets are judged. Do not use wrappers,
+  interpreters, `xargs`, or `find` to obscure a destructive target — those are unpacked
+  and judged too.
+- Do not abandon the task after one interception: switching to a compliant path usually
+  lets the work continue.

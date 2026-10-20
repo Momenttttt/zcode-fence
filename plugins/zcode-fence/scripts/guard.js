@@ -1859,8 +1859,6 @@ function writeLog(record, env, enabled) {
  * ================================================================ */
 
 const MODEL_MAX_INPUT_CHARS = 2000;
-const MODEL_KINDS = ['read_only', 'project_write', 'git_history', 'data_deletion',
-  'system_change', 'external_side_effect', 'exfiltration'];
 
 function isLocalAddress(host) {
   let h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
@@ -2077,9 +2075,10 @@ function httpPostJson(endpoint, proxy, extraHeaders, bodyObj, timeoutMs, cb) {
     sockets.push(socket);
     if (res.statusCode !== 200) { done(new Error('代理 CONNECT ' + res.statusCode)); return; }
     const tlsSock = tls.connect({ socket, servername: targetHost }, () => {
+      const agent = new https.Agent({ keepAlive: false, createConnection: () => tlsSock });
       const req = https.request({
         hostname: targetHost, port: targetPort, path: targetPath, method: 'POST',
-        headers, agent: false, createConnection: () => tlsSock,
+        headers, agent,
       }, onResponse);
       req.on('error', done);
       req.end(payload);
