@@ -2,11 +2,12 @@
 'use strict';
 
 /*
- * zcode-fence —— ZCode 确定性围栏插件（危险命令门 + 项目围栏）
+ * zcode-fence —— ZCode 确定性围栏插件（危险命令门 + 项目围栏 + 可选决策模型审核）
  *
  * 设计原则：
- *  - 纯规则匹配：同一条命令永远得到同一判定，无 AI 判断、无网络请求、零 npm 依赖（Node >= 16）。
- *  - 零误报哲学：项目内日常操作一律放行；只拦「灾难级命令」和「写到项目之外」两件事。
+ *  - 确定性规则：同一条命令永远得到同一判定，无 AI 判断；默认无网络请求，仅在显式开启
+ *    可选决策模型审核层时才访问配置端点；零 npm 依赖（Node >= 16）。
+ *  - 零误报哲学：项目内日常操作一律放行；只拦「灾难级命令」「写到项目之外」和「不可逆损失」三类。
  *  - ask-only：永不输出 allow/deny。命中违规输出 ask（弹确认），其余无输出 exit 0，
  *    交还宿主按其自身权限模式处理 —— 插件只加锁，不改锁。
  *  - fail-open：stdin 解析失败或内部异常时放行（exit 0 无输出），异常写入决策日志留痕。
@@ -1212,7 +1213,7 @@ function psJudge(payload, ctx, depth, add, cwd) {
 }
 
 /* ================================================================
- * 解释器内嵌脚本载荷（node -e / python -c / perl -e / ruby -e）
+ * 解释器内嵌脚本载荷（node -e / python -c / perl -e / ruby -e / php -r / deno eval / awk …）
  *
  * 2026-09-28 真实触发：agent 用 node -e 的 fs.writeFileSync 改写
  * ~/.agents/.skill-lock.json，围栏因 node 不在写命令表而静默放行。
@@ -2241,7 +2242,7 @@ function runGuard(stdinText, env, source) {
  * ================================================================ */
 
 const HELP = [
-  'zcode-fence —— ZCode 确定性围栏插件（危险命令门 + 项目围栏）',
+  'zcode-fence —— ZCode 确定性围栏插件（危险命令门 + 项目围栏 + 可选决策模型审核）',
   '',
   '用法：',
   '  node guard.js                       # hook 模式：从 stdin 读取 PreToolUse 载荷',
@@ -2254,6 +2255,7 @@ const HELP = [
   '  ZCODE_PROJECT_DIR   项目根（缺失则围栏降级，仅危险门生效）',
   '  ZCODE_FENCE_CONFIG  配置文件路径（默认 ~/.zcode/cli/config.json）',
   '  ZCODE_FENCE_DATA_DIR 决策日志目录',
+  '  ZCODE_FENCE_DECISION_MODEL_API_KEY 决策模型 key（优先于配置）',
 ].join('\n');
 
 function readAllStdin(cb) {

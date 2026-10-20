@@ -6,7 +6,7 @@
 
 **A deterministic fence plugin for ZCode: catastrophic-command gate + project write fence. Windows-first, works on all three platforms, ask-only, zero dependencies (Node ≥ 16).**
 
-When you run ZCode in "full access" mode, what you need is not another permission level but a **deterministic pre-flight guard**: if the AI accidentally runs `rm -rf C:/Users` or writes files to your desktop/home, ask first. The same command always gets the same verdict — pure rule matching, no AI judgment, no network activity by default, no third-party dependencies. When you want coverage for semantic risks rules cannot decide statically, an optional decision-model review layer can be enabled explicitly.
+When you run ZCode in "full access" mode, what you need is not another permission level but a **deterministic pre-flight guard**: if the AI accidentally runs `rm -rf C:/Users` or writes files to your desktop/home, ask first. With the optional decision-model layer off, the same command always gets the same verdict — deterministic rule matching, no AI judgment, no network activity by default, no third-party dependencies. When you want coverage for semantic risks rules cannot decide statically, an optional decision-model review layer can be enabled explicitly.
 
 ## What it guards against: real accidents on Windows
 
