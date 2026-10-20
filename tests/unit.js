@@ -327,11 +327,23 @@ t('cd 到项目外后相对写入 → 越界（围栏）', () => {
   const r = guard.judgePayload({ tool_name: 'Bash', tool_input: { command: 'cd C:/Users/alice && touch y' } }, smokeEnv);
   assert.ok(r.reasons.some((x) => x.indexOf('越界写入') >= 0));
 });
-t('cd 进临时目录后相对写/删除 → ask（相对目标不用临时目录白名单）', () => {
-  assert.ok(guard.judgePayload({ tool_name: 'Bash', tool_input: { command: 'cd /tmp && touch x' } }, smokeEnv)
-    .reasons.some((x) => x.indexOf('越界写入') >= 0));
-  assert.ok(guard.judgePayload({ tool_name: 'Bash', tool_input: { command: 'cd /tmp && rm -rf x' } }, smokeEnv)
-    .reasons.length > 0);
+t('cd 进临时目录后相对写/删除保持 silent（临时目录是白名单根）', () => {
+  // 直接构造可写根含 /tmp 的上下文：unit 的 smokeEnv 项目本身位于临时目录下，
+  // buildContext 会把父级临时根去重掉，不适合验证这条语义
+  const ctx = {
+    cfg: { enable_danger_gate: true, enable_fence: true, custom_rules: '' },
+    platform: 'linux', env: NIX_ENV, projectDir: '/home/u/proj', homeNorm: '/home/u',
+    npBash: { platform: 'linux', env: NIX_ENV, msysAlways: true },
+    npFile: { platform: 'linux', env: NIX_ENV, msysAlways: false },
+    roots: ['/home/u/proj', '/tmp'], notes: [],
+  };
+  const run = (cmd) => {
+    const reasons = [];
+    guard.judgeCommand(cmd, ctx, 0, (r) => reasons.push(r), '/home/u/proj');
+    return reasons;
+  };
+  assert.deepStrictEqual(run('cd /tmp && touch x'), []);
+  assert.deepStrictEqual(run('cd /tmp && rm -rf x'), []);
 });
 t('cd 进项目后相对删除保持沉默（零误报）', () => {
   const cmd = 'cd "' + projDir + '" && rm -rf node_modules';

@@ -33,7 +33,7 @@
 两层确定性防护，独立开关；另有一层默认关闭的可选决策模型审核：
 
 1. **危险命令门**（`enable_danger_gate`）：token 级精确组合匹配，只收**灾难级**：`rm -rf /`、`rm -rf ~`、`del /s /q C:\Users\x`、`format D:`、`dd of=/dev/sda`、`mkfs`、`diskutil eraseDisk`、fork 炸弹、`--no-preserve-root`、`chmod -R` 作用于根/home、PowerShell `Remove-Item` 作用于盘根/home、`reg delete` 根键、`cipher /w:`、`vssadmin delete shadows`、`shutdown`/`reboot` 等关机重启命令、`systemctl poweroff`、`bcdedit` 写引导、`diskpart` 等；藏进 `trap`/`eval`/`$()`/反引号载荷、混在 `then`/`do` 等控制流关键字后面的危险命令照样能识破；`node -e`/`python -c` 这类解释器内嵌脚本，只要写 API 和绝对路径字面量同时出现就拦（如 `node -e "…rmSync('C:/Windows'…)"`）。v1.4.0 进一步覆盖：包装器选项链与组合短开关、`find -delete`/`-exec` 按查找根判定、`xargs` 动态删除目标、`sed -i` 文件操作数、`awk system()` 与 `php -r`/`deno eval`/`bun -e`/`osascript` 的 shell 执行载荷、`curl | bash`/`bash <(curl)`/`eval "$(curl)"` 远程执行、`mount`/`umount`/`fdisk`/`parted` 变更、Git 不可逆操作（force/delete/mirror push、`branch -D`、`reset --hard`、`clean -fdx`、丢弃改动的 checkout/restore、`stash clear/drop` 等）、系统持久化（crontab、iptables flush、防火墙关闭、`reg add/delete`、`sc delete`、`systemctl enable/disable/mask/unmask`、`launchctl load/unload/bootstrap/bootout`、`schtasks /create|/delete|/change`）；支持自定义正则。
-2. **项目围栏**（`enable_fence`）：文件写入限制在**可写根**内 = 项目根（宿主注入的 `ZCODE_PROJECT_DIR`）+ 当前平台**真实临时目录**（Windows 读 `TEMP`/`TMP`，Unix 用 `TMPDIR` 且 `/tmp` 保留）+ ZCode 项目记忆目录（`~/.zcode/cli/memories`，宿主记忆功能高频写入，默认放行）+ 用户配置的额外可写根。Bash 命令按启发式判定（重定向目标、cp/mv/tar/curl/tee 等写命令的目标参数、`chmod`/`chown` 的全部路径操作数、`mv` 的源与目标、`sed -i` 的文件操作数、`find` 的删除根、解释器内嵌脚本里与写 API 同时出现的路径字面量）；命令内 `cd`/`pushd`/`popd` 会更新后续段的当前目录，相对写目标先按该目录解析，再与项目根/记忆目录/额外可写根比较（临时目录只接受绝对路径）；文件工具（Write/Edit/ApplyPatch）做精确判定（realpath + 符号链接逐级上溯防偷渡）。
+2. **项目围栏**（`enable_fence`）：文件写入限制在**可写根**内 = 项目根（宿主注入的 `ZCODE_PROJECT_DIR`）+ 当前平台**真实临时目录**（Windows 读 `TEMP`/`TMP`，Unix 用 `TMPDIR` 且 `/tmp` 保留）+ ZCode 项目记忆目录（`~/.zcode/cli/memories`，宿主记忆功能高频写入，默认放行）+ 用户配置的额外可写根。Bash 命令按启发式判定（重定向目标、cp/mv/tar/curl/tee 等写命令的目标参数、`chmod`/`chown` 的全部路径操作数、`mv` 的源与目标、`sed -i` 的文件操作数、`find` 的删除根、解释器内嵌脚本里与写 API 同时出现的路径字面量）；命令内 `cd`/`pushd`/`popd` 会更新后续段的当前目录，相对写目标先按该目录解析，再与可写根（项目根、临时目录、记忆目录、额外可写根）比较；文件工具（Write/Edit/ApplyPatch）做精确判定（realpath + 符号链接逐级上溯防偷渡）。
 
 **会话根锁定**（`lock_session_root`）：实测宿主注入的项目根跟着 Bash 当前目录走，agent `cd` 进子目录后，后续所有调用（含 Write/Edit）的项目根一起漂移，`cd` 出项目更会让围栏整段失效。开启后按每个会话**首次见到的根**判定，这个根基本就是会话打开时的工作区：cd 进子目录不会把写项目根误判成越界，cd 出项目之后越界写照样拦。状态记在插件数据目录的一个 `session-roots.log` 里（每会话一行、30 天过期、上限 200 条）。
 
@@ -47,7 +47,7 @@
 - 敏感文件读取/外带（SSH 私钥、`.env`、云凭证）；
 - 网络访问（ZCode 插件 API 控制不了）。
 
-相对越界写不在此列：命令内 cwd 跟踪会判定 `cd /c/Users/x && touch y`；相对目标只在项目根/记忆目录/额外可写根内放行，临时文件请用绝对路径。
+相对越界写不在此列：命令内 cwd 跟踪会判定 `cd /c/Users/x && touch y`；`cd` 进临时目录、记忆目录或项目目录后的相对写仍按可写根白名单放行。
 
 ## ask-only：只加锁，不开锁（本项目最重要的设计决定）
 

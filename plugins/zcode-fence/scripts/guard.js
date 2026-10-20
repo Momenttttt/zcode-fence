@@ -562,15 +562,10 @@ function resolveAgainstCwd(info, cwd, ctx) {
   return null;
 }
 
-function resolveTargetInfo(raw, ctx, cwd) {
-  const base = normalizePath(raw, ctx.npBash);
-  const relative = base.kind === 'relative';
-  const info = relative ? (cwd ? resolveAgainstCwd(base, cwd, ctx) : null) : base;
-  return { info, relative };
-}
-
 function resolveTarget(raw, ctx, cwd) {
-  return resolveTargetInfo(raw, ctx, cwd).info;
+  const info = normalizePath(raw, ctx.npBash);
+  if (info.kind === 'relative') return cwd ? resolveAgainstCwd(info, cwd, ctx) : null;
+  return info;
 }
 
 // 命令操作数（跳过开关与 Windows /x 单字母开关）
@@ -1476,23 +1471,18 @@ const DEST_FLAG = {
 };
 
 function judgeWriteTarget(rawTok, ctx, cmdLabel, cwd) {
-  const resolved = resolveTargetInfo(rawTok, ctx, cwd);
-  const info = resolved.info;
+  const info = resolveTarget(rawTok, ctx, cwd);
   if (!info || info.kind === 'empty') return null; // 相对路径且 cwd 未知 → fail-open
   // 未定义变量（如 Unix 上的 %USERPROFILE%）→ 无法判定归属，宁可多问一句
   if (info.kind === 'unresolved' || info.unresolved) {
     return '[' + PLUGIN_ID + ': 路径无法解析] ' + rawTok + ' 含未定义变量，无法判定归属，请改用明确路径';
   }
   if (info.kind === 'null' || info.kind === 'relative') return null;
-  // 相对目标按命令内目录解析后只在项目根/记忆目录/额外可写根内放行；临时目录需用绝对路径
-  // （cd /tmp && touch x 必须 ask，而直接写 /tmp/f 仍按临时目录白名单放行）
-  const roots = resolved.relative ? (ctx.nonTempRoots || ctx.roots) : ctx.roots;
-  if (!roots || !roots.length) return null; // ZCODE_PROJECT_DIR 缺失 → 围栏降级
-  if (!isInsideRoots(info.norm, roots, ctx.platform)) {
+  if (!ctx.roots || !ctx.roots.length) return null; // ZCODE_PROJECT_DIR 缺失 → 围栏降级
+  if (!isInsideRoots(info.norm, ctx.roots, ctx.platform)) {
     // 披露当前项目根：会话工作区开错层级时（如开在子目录）用户可一眼诊断
     return '[' + PLUGIN_ID + ': 越界写入] ' + cmdLabel + ' 的目标 ' + info.norm + ' 不在项目根 ' +
-      ctx.projectDir + ' 等可写根内' +
-      (resolved.relative ? '（相对目标按命令内目录解析，临时目录请改用绝对路径）' : '');
+      ctx.projectDir + ' 等可写根内';
   }
   return null;
 }
@@ -1770,14 +1760,13 @@ function buildContext(env, opts) {
 
   const ctx = {
     cfg: loaded.cfg, cfgPath: loaded.cfgPath, notes: loaded.notes,
-    platform, env, projectDir, homeNorm, npFile, npBash, roots: null, nonTempRoots: null,
+    platform, env, projectDir, homeNorm, npFile, npBash, roots: null,
   };
 
   if (projectDir) {
     // 可写根 = 项目根 + 当前平台真实临时目录 + ZCode 项目记忆目录 + 用户配置的额外可写根。
-    // nonTempRoots 供「相对写目标」使用：临时目录只接受绝对路径，cd 进临时目录后的相对写仍 ask。
+    // 相对写目标按命令内 cwd 解析后同样与这些根比较（cd 进临时目录后的相对写仍放行）。
     const roots = [projectDir];
-    const nonTempRoots = [projectDir];
     const temps = platform === 'win32'
       ? [env.TEMP, env.TMP, os.tmpdir()]     // Windows 读 TEMP/TMP（真实临时目录）
       : [env.TMPDIR, '/tmp', os.tmpdir()];   // Unix 用 TMPDIR，/tmp 保留
@@ -1785,17 +1774,14 @@ function buildContext(env, opts) {
     // 避免完全访问模式下反复弹确认。用正斜杠 join，兼容 HOME 为 MSYS 风格（/c/Users/x）的环境。
     const memRoot = [homeOf(env), '.zcode', 'cli', 'memories'].join('/');
     const extras = splitList(ctx.cfg.extra_writable_roots);
-    const addRoot = (list, t) => {
-      if (!t) return;
+    for (const t of temps.concat([memRoot], extras)) {
+      if (!t) continue;
       const i = normalizePath(t, npFile);
-      if (i.kind !== 'drive' && i.kind !== 'unix' && i.kind !== 'unc') return;
+      if (i.kind !== 'drive' && i.kind !== 'unix' && i.kind !== 'unc') continue;
       const r = realPathBest(i.norm, platform) || i.norm;
-      if (!list.some((x) => isUnder(r, x, platform) || isUnder(x, r, platform))) list.push(r);
-    };
-    for (const t of temps) addRoot(roots, t);
-    for (const t of [memRoot].concat(extras)) { addRoot(roots, t); addRoot(nonTempRoots, t); }
+      if (!roots.some((x) => isUnder(r, x, platform) || isUnder(x, r, platform))) roots.push(r);
+    }
     ctx.roots = roots;
-    ctx.nonTempRoots = nonTempRoots;
   }
   return ctx;
 }

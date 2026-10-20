@@ -76,7 +76,7 @@
   { "id": "DG-72", "group": "危险门", "desc": "wsl -d 选项链后的 rm -rf /", "mode": "bash", "command": "wsl -d Ubuntu rm -rf /", "expect": "ask" },
   { "id": "DG-73", "group": "危险门", "desc": "cd / 后相对目标 etc 解析为 /etc（cwd 状态进入危险门）", "mode": "bash", "command": "cd / && rm -rf etc", "expect": "ask" },
 
-  { "id": "FB-48", "group": "围栏-Bash", "desc": "cd /tmp 后相对写 → ask（相对目标不使用临时目录白名单，临时文件请用绝对路径）", "mode": "bash", "command": "cd /tmp && touch x", "expect": "ask" },
+  { "id": "FB-48", "group": "围栏-Bash", "desc": "cd /tmp 后相对写放行（临时目录是白名单根，与 FB-04/05 口径一致）", "mode": "bash", "command": "cd /tmp && touch x", "expect": "silent" },
   { "id": "FB-49", "group": "围栏-Bash", "desc": "cd 进项目后相对删除仍放行（零误报）", "mode": "bash", "command": "cd \"{PROJECT}\" && rm -rf node_modules", "expect": "silent" },
   { "id": "FB-50", "group": "围栏-Bash", "desc": "MSYS 形态 cd 进项目后相对写入放行", "mode": "bash", "command": "cd \"{PROJECT_MSYS}\" && touch src/a.ts", "expect": "silent" },
 
@@ -208,7 +208,7 @@
   { "id": "FB-70", "group": "围栏-Bash", "desc": "find 分支不跳过外层重定向目标（审查回归）", "mode": "bash", "command": "find {PROJECT} -name '*.tmp' -delete > C:/Users/alice/log.txt", "expect": "ask" },
   { "id": "FB-71", "group": "围栏-Bash", "desc": "sed 分支不跳过外层重定向目标（审查回归）", "mode": "bash", "command": "sed -n 's/x/y/p' /etc/passwd > C:/Users/alice/out.txt", "expect": "ask" },
 
-  { "id": "FB-72", "group": "围栏-Bash", "desc": "cd /tmp 后相对删除 → ask（spec 用户故事 3）", "mode": "bash", "command": "cd /tmp && rm -rf x", "expect": "ask" },
+  { "id": "FB-72", "group": "围栏-Bash", "desc": "cd /tmp 后相对删除放行（临时目录是白名单根）", "mode": "bash", "command": "cd /tmp && rm -rf x", "expect": "silent" },
   { "id": "FB-73", "group": "围栏-Bash", "desc": "chown --reference 的所有操作数都是路径", "mode": "bash", "command": "chown --reference=/etc/passwd /etc/hosts", "expect": "ask" },
   { "id": "FB-74", "group": "围栏-Bash", "desc": "cd 进额外可写根后相对写仍放行（额外根不因 cd 失效）", "mode": "bash", "command": "cd \"{EXTRA}\" && touch x", "expect": "silent", "config": "extra-roots" },
   { "id": "DG-174", "group": "危险门", "desc": "git push -uf 组合短开关含 force", "mode": "bash", "command": "git push -uf origin main", "expect": "ask" },
