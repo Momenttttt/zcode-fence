@@ -21,6 +21,8 @@ const GUARD = path.join(ROOT, 'plugins', 'zcode-fence', 'scripts', 'guard.js');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-fence-dm-'));
 const PROJECT = path.join(TMP, 'project');
 fs.mkdirSync(path.join(PROJECT, 'src'), { recursive: true });
+// macOS 的 /var 是指向 /private/var 的符号链接；插件有意按 realpath 归一项目根
+const PROJECT_REAL = fs.realpathSync(PROJECT);
 
 let passed = 0;
 let failed = 0;
@@ -304,7 +306,7 @@ function caseDir() {
     assert.deepStrictEqual(Object.keys(lastBody.state).sort(), ['input', 'project_root', 'tool']);
     assert.strictEqual(lastBody.state.tool, 'Bash');
     assert.ok(lastBody.state.input.indexOf('echo hi') === 0);
-    assert.strictEqual(lastBody.state.project_root, PROJECT);
+    assert.strictEqual(lastBody.state.project_root, PROJECT_REAL);
     assert.ok(lastBody.questions && lastBody.questions.ask && lastBody.questions.ask.type === 'noul');
     assert.strictEqual(lastBody.questions.kind.type, 'choice');
     assert.ok(lastBody.questions.kind.criteria.data_deletion);
