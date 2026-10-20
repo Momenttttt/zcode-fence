@@ -306,6 +306,38 @@ t('sed -i 文件操作数按写目标判', () => {
   assert.strictEqual(r.reasons.length, 0);
 });
 
+console.log('== Git 不可逆操作 ==');
+const gitAsk = (cmd) => guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv).reasons;
+t('force/delete/mirror push 与 +refspec', () => {
+  for (const c of ['git push --force', 'git push -f', 'git push --force-with-lease',
+    'git push --force-with-lease=main', 'git push --delete origin br', 'git push --mirror',
+    'git push origin +main', 'git -C repo push --force']) {
+    assert.ok(gitAsk(c).some((x) => x.indexOf('危险命令') >= 0), c);
+  }
+});
+t('push/clean 的显式安全形态放行', () => {
+  for (const c of ['git push --dry-run', 'git push --no-force', 'git clean -n', 'git clean --dry-run']) {
+    assert.strictEqual(gitAsk(c).length, 0, c);
+  }
+});
+t('reset/branch/tag/checkout/restore/stash/worktree/abort/reflog/rm', () => {
+  for (const c of ['git reset --hard', 'git reset --merge', 'git branch -D main', 'git branch --delete --force x',
+    'git tag -d v1', 'git clean -fdx', 'git checkout -f main', 'git checkout -- .',
+    'git checkout HEAD -- src/a.ts', 'git checkout -B main', 'git restore src/a.ts',
+    'git restore --worktree src/a.ts', 'git stash clear', 'git stash drop',
+    'git worktree remove --force wt', 'git rebase --abort', 'git merge --abort',
+    'git reflog delete', 'git rm -rf x']) {
+    assert.ok(gitAsk(c).length > 0, c);
+  }
+});
+t('Git 安全分支/索引操作与危险文本参数放行', () => {
+  for (const c of ['git checkout main', 'git switch main', 'git branch -d old',
+    'git restore --staged src/a.ts', 'git stash pop', 'git reset --hard --help',
+    'git commit -m "rm -rf /"', 'git log --grep "force push"', 'git tag -a v1 -m "rm -rf /"']) {
+    assert.strictEqual(gitAsk(c).length, 0, c);
+  }
+});
+
 console.log('== RCE 管道 / 系统存储 / 元数据写 ==');
 const t03 = (cmd, extra) => guard.judgePayload(Object.assign({ tool_name: 'Bash', tool_input: { command: cmd } }, extra || {}), smokeEnv).reasons;
 t('下载器管道进 shell ask；数据处理/语法检查放行', () => {

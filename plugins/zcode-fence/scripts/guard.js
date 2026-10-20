@@ -574,6 +574,122 @@ function dangerTargetsOf(args, ctx, cwd) {
   return out;
 }
 
+/* ---- Git 不可逆操作（即使发生在项目内也 ask） ---- */
+
+const GIT_GLOBAL_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace',
+  '--exec-path', '--super-prefix', '--config-env']);
+const GIT_GLOBAL_FLAG = new Set(['-p', '--paginate', '--no-pager', '--bare', '--literal-pathspecs',
+  '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs', '--no-replace-objects',
+  '--version', '--help', '-h']);
+
+function gitCommandOf(args) {
+  let i = 0;
+  for (; i < args.length; i++) {
+    const t = args[i];
+    if (t === '--') { i++; break; }
+    if (GIT_GLOBAL_VALUE.has(t)) { i++; continue; }
+    if (t.indexOf('--') === 0 && t.indexOf('=') > 0) continue;
+    if (GIT_GLOBAL_FLAG.has(t)) continue;
+    if (t[0] === '-') continue;
+    break;
+  }
+  return { cmd: args[i] || '', rest: args.slice(i + 1) };
+}
+
+function anyFlag(rest, flags) {
+  return rest.some((t) => flags.indexOf(t) >= 0);
+}
+
+function anyShortWith(rest, letter) {
+  const re = new RegExp('^-[A-Za-z]*' + letter + '[A-Za-z]*$');
+  return rest.some((t) => re.test(t));
+}
+
+// 返回 {label, rule} 或 null
+function gitDisposition(args) {
+  const g = gitCommandOf(args);
+  const cmd = g.cmd;
+  const rest = g.rest;
+  if (!cmd) return null;
+  // --help / -h 是显式安全形态（任何子命令）
+  if (anyFlag(rest, ['--help', '-h'])) return null;
+  const dryRun = anyFlag(rest, ['--dry-run', '-n']);
+
+  if (cmd === 'push') {
+    if (dryRun) return null;
+    if (rest.some((t) => t === '--force' || t === '-f' || t === '--force-with-lease' ||
+        t.indexOf('--force-with-lease=') === 0 || t === '--force-if-includes' ||
+        t === '--delete' || t === '-d' || t === '--mirror' || t.charAt(0) === '+')) {
+      return { label: '强制/删除/镜像推送', rule: 'DG-GIT-PUSH-FORCE' };
+    }
+    return null;
+  }
+  if (cmd === 'branch') {
+    if (anyShortWith(rest, 'D') || (anyFlag(rest, ['--delete', '-d']) && anyFlag(rest, ['--force', '-f']))) {
+      return { label: '强制删除分支', rule: 'DG-GIT-BRANCH-DELETE' };
+    }
+    return null;
+  }
+  if (cmd === 'tag') {
+    if (anyFlag(rest, ['-d', '--delete'])) return { label: '删除标签', rule: 'DG-GIT-TAG-DELETE' };
+    return null;
+  }
+  if (cmd === 'reset') {
+    if (anyFlag(rest, ['--hard', '--merge'])) return { label: '--hard/--merge 丢弃改动', rule: 'DG-GIT-RESET-HARD' };
+    return null;
+  }
+  if (cmd === 'clean') {
+    if (dryRun || anyFlag(rest, ['--no-force'])) return null;
+    if (anyFlag(rest, ['--force']) || anyShortWith(rest, 'f')) {
+      return { label: '强制删除未跟踪文件', rule: 'DG-GIT-CLEAN-FORCE' };
+    }
+    return null;
+  }
+  if (cmd === 'checkout') {
+    if (anyFlag(rest, ['--force']) || anyShortWith(rest, 'f') || anyShortWith(rest, 'B') || rest.indexOf('--') >= 0) {
+      return { label: '丢弃工作区改动', rule: 'DG-GIT-CHECKOUT-DISCARD' };
+    }
+    return null;
+  }
+  if (cmd === 'restore') {
+    const stagedOnly = anyFlag(rest, ['--staged', '-S']) && !anyFlag(rest, ['--worktree', '-W']);
+    if (stagedOnly) return null;
+    return { label: '丢弃工作区改动', rule: 'DG-GIT-RESTORE-DISCARD' };
+  }
+  if (cmd === 'stash') {
+    if (rest[0] === 'clear' || rest[0] === 'drop') {
+      return { label: 'stash ' + rest[0] + ' 丢弃暂存', rule: 'DG-GIT-STASH-DROP' };
+    }
+    return null;
+  }
+  if (cmd === 'worktree' && rest[0] === 'remove') {
+    if (anyFlag(rest, ['--force']) || anyShortWith(rest, 'f')) {
+      return { label: 'worktree remove --force', rule: 'DG-GIT-WORKTREE-FORCE' };
+    }
+    return null;
+  }
+  if ((cmd === 'rebase' || cmd === 'merge') && anyFlag(rest, ['--abort'])) {
+    return { label: '--abort 中止并丢弃进度', rule: 'DG-GIT-ABORT' };
+  }
+  if (cmd === 'reflog' && rest[0] === 'delete') {
+    return { label: 'reflog delete 删除历史记录', rule: 'DG-GIT-REFLOG-DELETE' };
+  }
+  if (cmd === 'rm') {
+    if (anyFlag(rest, ['--force']) || anyShortWith(rest, 'f') || anyShortWith(rest, 'r')) {
+      return { label: '递归/强制删除版本控制文件', rule: 'DG-GIT-RM-FORCE' };
+    }
+    return null;
+  }
+  return null;
+}
+
+function gitJudge(args, ctx, add) {
+  const d = gitDisposition(args);
+  if (!d) return;
+  const cmd = gitCommandOf(args).cmd;
+  gateReason(add, 'git ' + cmd + ' ' + d.label, d.rule);
+}
+
 /* ---- find：-delete / -exec 删除按查找根判定 ---- */
 
 const FIND_EXEC_DELETE = new Set(['rm', 'del', 'rd', 'rmdir', 'erase', 'shred', 'unlink', 'remove-item', 'ri']);
@@ -847,6 +963,10 @@ function gateSegment(seg, ctx, depth, add, cwd) {
     if (!args.length || args.some((a) => a === 'print' || a === '-l' || a === '--list' ||
         a === '--help' || a === '-h')) return;
     gateReason(add, 'parted 分区表操作', 'DG-PARTED');
+    return;
+  }
+  if (name === 'git') {
+    gitJudge(args, ctx, add);
     return;
   }
   if (name === 'find') {
