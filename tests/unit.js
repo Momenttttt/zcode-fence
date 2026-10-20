@@ -338,6 +338,29 @@ t('Git 安全分支/索引操作与危险文本参数放行', () => {
   }
 });
 
+console.log('== 系统持久化 ==');
+const persistAsk = (cmd) => guard.judgePayload({ tool_name: 'Bash', tool_input: { command: cmd } }, smokeEnv).reasons;
+t('持久化变更 ask', () => {
+  for (const c of ['crontab -r', 'iptables -F', 'iptables --flush',
+    'netsh advfirewall set allprofiles state off', 'netsh firewall set opmode disable',
+    'reg add HKCU' + String.fromCharCode(92) + 'Software' + String.fromCharCode(92) + 'X /v y',
+    'reg delete HKCU' + String.fromCharCode(92) + 'Software' + String.fromCharCode(92) + 'X /f',
+    'sc delete MyService', 'systemctl enable nginx', 'systemctl disable nginx',
+    'systemctl mask nginx', 'systemctl unmask nginx', 'launchctl load x.plist',
+    'launchctl unload x.plist', 'launchctl bootstrap gui/501 x', 'launchctl bootout gui/501/x',
+    'schtasks /create /tn X', 'schtasks /delete /tn X', 'schtasks /change /tn X']) {
+    assert.ok(persistAsk(c).length > 0, c);
+  }
+});
+t('查询/日常启停/进程管理放行（零误报）', () => {
+  for (const c of ['crontab -l', 'iptables -L', 'netsh advfirewall show allprofiles state',
+    'reg query HKCU', 'sc query MyService', 'systemctl start nginx', 'systemctl stop nginx',
+    'systemctl restart nginx', 'systemctl status nginx', 'launchctl list',
+    'schtasks /query /tn X', 'taskkill /F /IM svchost.exe', 'pkill -9 -f node']) {
+    assert.strictEqual(persistAsk(c).length, 0, c);
+  }
+});
+
 console.log('== RCE 管道 / 系统存储 / 元数据写 ==');
 const t03 = (cmd, extra) => guard.judgePayload(Object.assign({ tool_name: 'Bash', tool_input: { command: cmd } }, extra || {}), smokeEnv).reasons;
 t('下载器管道进 shell ask；数据处理/语法检查放行', () => {

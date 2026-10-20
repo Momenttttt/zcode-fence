@@ -520,6 +520,9 @@ const PS_DISK_KILLER = new Set(['format-volume', 'clear-disk', 'remove-partition
 // 关机/重启族：无路径的系统级破坏（2026-09 调研 Codex/Kimi 后补充；正常开发工作流不会触碰）
 const POWER_CMDS = new Set(['shutdown', 'halt', 'poweroff', 'reboot', 'stop-computer', 'restart-computer']);
 const SYSTEMCTL_KILLERS = new Set(['poweroff', 'reboot', 'halt', 'kexec']);
+// 持久化变更：重启后仍生效；start/stop/restart/status 属日常操作，放行
+const SYSTEMCTL_PERSIST = new Set(['enable', 'disable', 'mask', 'unmask', 'reenable']);
+const LAUNCHCTL_PERSIST = new Set(['load', 'unload', 'bootstrap', 'bootout']);
 const BCDEDIT_WRITE_FLAGS = /^\/(set|delete|import|restore)$/i;
 const REG_HIVES = {
   hklm: 1, hkcu: 1, hkcr: 1, hku: 1, hkcc: 1,
@@ -899,14 +902,19 @@ function gateSegment(seg, ctx, depth, add, cwd) {
   }
   if (name === 'reg') {
     if (/^delete\b/i.test(rest)) {
+      let rootHit = false;
       const hiveTok = args.find((a) => /^(HK[A-Z]{2}|HKEY_[A-Z_]+)(\\|$)/i.test(a));
       if (hiveTok) {
         const head = hiveTok.split(/[\\/]/)[0].toLowerCase();
         const depth = hiveTok.split(/[\\/]/).filter(Boolean).length - 1;
         if (REG_HIVES[head] && depth <= 1) {
           gateReason(add, 'reg delete 作用于注册表根键 ' + hiveTok, 'DG-REG-DELETE');
+          rootHit = true;
         }
       }
+      if (!rootHit) gateReason(add, 'reg delete 修改注册表', 'DG-REG-PERSIST');
+    } else if (/^(add|import)\b/i.test(rest)) {
+      gateReason(add, 'reg ' + /^(add|import)/i.exec(rest)[0] + ' 持久化注册表变更', 'DG-REG-PERSIST');
     }
     return;
   }
@@ -929,7 +937,48 @@ function gateSegment(seg, ctx, depth, add, cwd) {
   }
   if (name === 'systemctl') {
     const sub = args.find((a) => SYSTEMCTL_KILLERS.has(String(a).toLowerCase()));
-    if (sub) gateReason(add, 'systemctl 电源控制子命令 ' + sub, 'DG-SYSTEMCTL-POWER');
+    if (sub) {
+      gateReason(add, 'systemctl 电源控制子命令 ' + sub, 'DG-SYSTEMCTL-POWER');
+      return;
+    }
+    const persist = args.find((a) => SYSTEMCTL_PERSIST.has(String(a).toLowerCase()));
+    if (persist) gateReason(add, 'systemctl ' + persist + ' 持久化服务状态', 'DG-SYSTEMCTL-PERSIST');
+    return;
+  }
+  if (name === 'crontab') {
+    if (args.some((a) => a === '-r' || a === '--remove')) {
+      gateReason(add, 'crontab -r 删除定时任务', 'DG-CRON-REMOVE');
+    }
+    return;
+  }
+  if (name === 'iptables' || name === 'ip6tables') {
+    if (args.some((a) => a === '-F' || a === '--flush')) {
+      gateReason(add, name + ' flush 清空防火墙规则', 'DG-IPTABLES-FLUSH');
+    }
+    return;
+  }
+  if (name === 'netsh') {
+    const low = args.map((a) => String(a).toLowerCase());
+    const firewall = low.some((a) => a === 'advfirewall' || a === 'firewall');
+    const changing = low.some((a) => a === 'set' || a === 'reset');
+    const disabling = low.some((a) => a === 'off' || a === 'disable' || a === 'disabled');
+    if (firewall && changing && disabling) {
+      gateReason(add, 'netsh 关闭防火墙', 'DG-NETSH-FIREWALL');
+    }
+    return;
+  }
+  if (name === 'sc') {
+    if (/^delete\b/i.test(rest)) gateReason(add, 'sc delete 删除服务', 'DG-SC-DELETE');
+    return;
+  }
+  if (name === 'launchctl') {
+    const sub = args.find((a) => LAUNCHCTL_PERSIST.has(String(a).toLowerCase()));
+    if (sub) gateReason(add, 'launchctl ' + sub + ' 持久化/变更服务', 'DG-LAUNCHCTL-PERSIST');
+    return;
+  }
+  if (name === 'schtasks') {
+    const hit = args.find((a) => /^\/(create|delete|change)$/i.test(a));
+    if (hit) gateReason(add, 'schtasks ' + hit + ' 修改计划任务', 'DG-SCHTASKS-PERSIST');
     return;
   }
   if (name === 'init' || name === 'telinit') {
