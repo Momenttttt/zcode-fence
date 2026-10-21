@@ -2283,8 +2283,11 @@ async function decisionModelJudge(payload, judged, env) {
     questions: modelQuestions(!!policy.text),
   };
   if (policy.text) body.state.policy = policy.text;
-  // 当前目录只在能归一为绝对路径时发送；可写根仅在非空时发送
-  if (judged.ctx.cwd) body.state.cwd = judged.ctx.cwd;
+  // 当前目录只在能归一为绝对路径时发送；与项目根/可写根同样按 realpath 归一，
+  // 避免 macOS /var → /private/var 让模型看到两套前缀、误以为 cwd 在可写根外。
+  if (judged.ctx.cwd) {
+    body.state.cwd = realPathBest(judged.ctx.cwd, judged.ctx.platform) || judged.ctx.cwd;
+  }
   if (judged.ctx.modelRoots && judged.ctx.modelRoots.length) {
     body.state.allowed_roots = judged.ctx.modelRoots.slice();
   }
