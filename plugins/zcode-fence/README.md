@@ -45,7 +45,7 @@ Two deterministic layers, independent switches, plus one optional layer:
 
 **Session-root locking** (`lock_session_root`) judges each session against the first root it saw, so `cd`-ing into a subdirectory no longer causes false positives and `cd`-ing out no longer disables the fence. State lives in `session-roots.log` (30-day expiry, 200-entry cap).
 
-**Optional decision-model review** is off by default. Only after both deterministic layers stay silent are the tool name, command or path, and project root sent to the configured model with one question: should the user confirm this? The model can only answer ask or silence; confirmation appears when the probability reaches the threshold (default 0.6). Missing endpoint, timeout, network error or invalid response all fail open and are logged. Secrets are redacted before sending; file contents, conversation history and session memory are never sent; no vendor endpoint is hardcoded.
+**Optional decision-model review** is off by default. Only after both deterministic layers stay silent does the plugin send one request with five questions at once: data loss, system change, external side effects, exfiltration, plus an execution diagnostic (tool name, command or path, project root, current directory and writable roots). One numeric setting, `decision_model_strictness` (`0` relaxed, `1` standard, `2` strict), controls the four risk thresholds. Any dimension at or above its threshold triggers ask; the kind is the dimension with the largest margin, ties broken by blast radius. Nothing crossing stays silent; a diagnostic score `≥ 0.70` labels the call `code_execution`, otherwise `routine`. A custom `decision_model_prompt` is appended as an advisory `state.policy` and never replaces the five built-in questions. Missing endpoint, timeout, network error, invalid response or a missing risk dimension all fail open and are logged. Secrets are redacted before sending; file contents, conversation history and session memory are never sent; no vendor endpoint is hardcoded. The API key is masked in the settings UI but stays plaintext in `config.json`.
 
 **Windows is the foundation, not an afterthought**: drive-letter paths (either slash style), Git Bash / MSYS paths (`/c/Users/...`), environment variables (`%USERPROFILE%`, `%TEMP%`, `$HOME`), quoted redirect targets and the real temp directory are normalized before any judgment.
 
@@ -81,12 +81,12 @@ Edit in the plugin settings UI; values persist under `plugins.options["zcode-fen
 | `enable_decision_model` | boolean | `false` | Review layer switch; no network requests while off |
 | `decision_model_endpoint` | string | `""` | Full POST endpoint; must be https, or http on localhost/private networks |
 | `decision_model_model` | string | `""` | `model` field in the request body; omitted when empty |
-| `decision_model_api_key` | string | `""` | Bearer key; `ZCODE_FENCE_DECISION_MODEL_API_KEY` takes precedence |
-| `decision_model_threshold` | string | `"0.6"` | Confirmation probability threshold, 0–1 |
+| `decision_model_api_key` | string | `""` | Bearer key; `ZCODE_FENCE_DECISION_MODEL_API_KEY` takes precedence; masked in the settings UI |
+| `decision_model_strictness` | number | `1` | Strictness: `0` relaxed, `1` standard, `2` strict; invalid values fall back to 1 |
 | `decision_model_timeout_ms` | string | `"3500"` | Timeout in ms, capped at 4000 (hook total is 5000) |
 | `decision_model_headers` | string | `""` | Extra headers, semicolon-separated `Name: Value` |
 | `decision_model_proxy` | string | `""` | `http://` proxy; falls back to environment proxies, NO_PROXY and localhost bypass |
-| `decision_model_prompt` | string | `""` | Optional override for the confirmation prompt |
+| `decision_model_prompt` | string | `""` | Optional advisory policy appended as `state.policy`; never replaces the five built-in questions; omitted when empty; redacted and capped at 1000 characters |
 
 ## Self-test and logs
 

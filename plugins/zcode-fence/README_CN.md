@@ -45,7 +45,7 @@
 
 **会话根锁定**（`lock_session_root`）按每个会话首次见到的根判定，`cd` 进子目录不误报，`cd` 出项目不失效。状态存于 `session-roots.log`（30 天过期，上限 200 条）。
 
-**可选决策模型审核**默认关闭。只有前两层都沉默时，才把工具名、命令或路径、项目根发给配置的模型，问一个问题：这次操作是否该让用户确认？模型只能回 ask 或沉默，概率达到阈值（默认 0.6）才弹确认。未配置端点、超时、网络错误、响应不合法一律 fail-open 并写日志。发送前脱敏密钥，不发送文件内容、对话历史或会话记忆，源码不硬编码厂商地址。
+**可选决策模型审核**默认关闭。只有前两层都沉默时才发一次请求，同时问五个问题：数据损失、系统变更、外部副作用、数据外带，以及仅用于标注的代码执行诊断（同时发送工具名、命令或路径、项目根、当前目录和可写根）。一个数字档位 `decision_model_strictness`（`0` 宽松、`1` 标准、`2` 严格）控制四个风险阈值；任一维度达到阈值即 ask，kind 取超过阈值最多的维度，并列时按影响范围从高到低。全部未达阈值时沉默，诊断分数 `≥ 0.70` 记为 `code_execution`，否则 `routine`。自定义 `decision_model_prompt` 追加为 advisory 的 `state.policy`，不会替换五个内置问题。未配置端点、超时、网络错误、响应不合法、缺少任一风险维度一律 fail-open 并写日志。发送前脱敏密钥，不发送文件内容、对话历史或会话记忆，源码不硬编码厂商地址；API key 在设置界面掩码显示，配置文件仍明文保存。
 
 **Windows 不是补丁，是地基**：盘符路径（正反斜杠均可）、Git Bash / MSYS 路径（`/c/Users/...`）、环境变量（`%USERPROFILE%`、`%TEMP%`、`$HOME`）、带引号的重定向目标、真实临时目录，全部先归一化再判定。
 
@@ -81,12 +81,12 @@ hook 的 `allow` 唯一效果是跳过宿主例行询问，只会让模式更宽
 | `enable_decision_model` | 布尔 | `false` | 审核层总开关；关闭时不发任何网络请求 |
 | `decision_model_endpoint` | 字符串 | `""` | 完整 POST 地址；必须 https，本机/私网可用 http |
 | `decision_model_model` | 字符串 | `""` | 请求体 `model` 字段；留空不发送 |
-| `decision_model_api_key` | 字符串 | `""` | Bearer key；环境变量 `ZCODE_FENCE_DECISION_MODEL_API_KEY` 优先 |
-| `decision_model_threshold` | 字符串 | `"0.6"` | 确认概率阈值 0–1 |
+| `decision_model_api_key` | 字符串 | `""` | Bearer key；环境变量 `ZCODE_FENCE_DECISION_MODEL_API_KEY` 优先；设置界面掩码显示 |
+| `decision_model_strictness` | 数字 | `1` | 严格度：`0` 宽松、`1` 标准、`2` 严格；非法值回退 1 |
 | `decision_model_timeout_ms` | 字符串 | `"3500"` | 超时毫秒，上限 4000（hook 总超时 5000） |
 | `decision_model_headers` | 字符串 | `""` | 额外请求头，分号分隔 `Name: Value` |
 | `decision_model_proxy` | 字符串 | `""` | `http://` 代理；留空读环境代理，NO_PROXY 与本机直连 |
-| `decision_model_prompt` | 字符串 | `""` | 可选，覆盖「是否该让用户确认」的提示词 |
+| `decision_model_prompt` | 字符串 | `""` | 可选，追加到内置策略（`state.policy`），不替换五个内置问题；留空不发送；脱敏后截断到 1000 字符 |
 
 ## 自测与日志
 

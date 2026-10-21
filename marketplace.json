@@ -18,7 +18,7 @@
         "en": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies; covers irreversible git and system persistence, with an optional decision-model review layer.",
         "zh-CN": "Windows 优先适配的项目围栏 + 灾难级命令门。纯规则匹配、ask-only、零依赖；覆盖 Git 不可逆与系统持久化，可选决策模型审核层。"
       },
-      "version": "1.4.0",
+      "version": "1.5.0",
       "author": {
         "name": "zcode-fence contributors",
         "url": "https://github.com/Momenttttt/zcode-fence"

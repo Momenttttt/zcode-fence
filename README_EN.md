@@ -74,9 +74,19 @@ The host-injected project root follows the Bash current directory: once the agen
 
 ### Optional decision-model review layer (off by default)
 
-Rules see shape, not intent. When enabled, only after both deterministic layers stay silent are the tool name, command or path, and project root sent to the configured model, with one question: should the user confirm this? The model can only answer ask or silence; confirmation appears when the probability reaches the threshold (default 0.6).
+Rules see shape, not intent. When enabled, only after both deterministic layers stay silent does the plugin make a single request, sending the tool name, command or path, project root, current directory and writable roots to the configured model and asking five questions at once:
 
-A missing endpoint, a timeout (default 3500 ms, capped at 4000 ms), a network error or an invalid response all fail open — the deterministic verdict stands. Secrets (API keys, tokens, passwords, Authorization headers, private-key blocks) are redacted before sending; file contents, conversation history and session memory are never sent. Endpoint, model, key, threshold, timeout, headers, proxy and prompt are all configurable, and the source hardcodes no vendor address.
+- **Data loss**: deleting, overwriting or corrupting data, history, remote objects, databases, backups or volumes that are hard to recover;
+- **System change**: machine-wide or user-wide state, services, persistence, storage, global package installs;
+- **External side effect**: publishing, deploying, force/mirror/delete pushes, remote deletion or overwrites, uploads, remote API writes;
+- **Exfiltration**: credentials, secrets, private keys or private user data leaving the machine;
+- **Execution diagnostic**: whether the call executes code whose full behavior is hidden; used only to label silent calls, never to trigger ask.
+
+The four risk dimensions have built-in thresholds controlled by one numeric setting, `decision_model_strictness`: `0` relaxed, `1` standard (default), `2` strict. Any dimension at or above its threshold triggers ask; the reported kind is the dimension with the largest margin (`score - threshold`), with ties broken by blast radius (exfiltration > external side effect > irreversible loss > system change). When nothing crosses, the call stays silent and the diagnostic score `≥ 0.70` labels it `code_execution`, otherwise `routine`.
+
+`decision_model_prompt` is now appended as an advisory `state.policy`; it never replaces the five built-in questions and is omitted when empty. The API key is marked sensitive in the host settings UI and shown masked, while `config.json` keeps it in plaintext.
+
+A missing endpoint, a timeout (default 3500 ms, capped at 4000 ms), a network error, an invalid response or a missing risk dimension all fail open — the deterministic verdict stands. Secrets (API keys, tokens, passwords, Authorization headers, private-key blocks) are redacted before sending; file contents, conversation history and session memory are never sent. Endpoint, model, key, strictness, timeout, headers, proxy and additional policy are all configurable, and the source hardcodes no vendor address.
 
 ## ask-only: it only tightens, never loosens
 
@@ -131,12 +141,12 @@ Edit in the plugin settings UI; values persist under `plugins.options["zcode-fen
 | `enable_decision_model` | boolean | `false` | Review layer switch; no network requests while off |
 | `decision_model_endpoint` | string | `""` | Full POST endpoint; must be https, or http on localhost/private networks |
 | `decision_model_model` | string | `""` | `model` field in the request body; omitted when empty |
-| `decision_model_api_key` | string | `""` | Bearer key; `ZCODE_FENCE_DECISION_MODEL_API_KEY` takes precedence |
-| `decision_model_threshold` | string | `"0.6"` | Confirmation probability threshold, 0–1 |
+| `decision_model_api_key` | string | `""` | Bearer key; `ZCODE_FENCE_DECISION_MODEL_API_KEY` takes precedence; masked in the settings UI |
+| `decision_model_strictness` | number | `1` | Strictness: `0` relaxed, `1` standard, `2` strict; invalid values fall back to 1 |
 | `decision_model_timeout_ms` | string | `"3500"` | Timeout in ms, capped at 4000 (hook total is 5000) |
 | `decision_model_headers` | string | `""` | Extra headers, semicolon-separated `Name: Value` |
 | `decision_model_proxy` | string | `""` | `http://` proxy; falls back to environment proxies, NO_PROXY and localhost bypass |
-| `decision_model_prompt` | string | `""` | Optional override for the confirmation prompt |
+| `decision_model_prompt` | string | `""` | Optional advisory policy appended as `state.policy`; never replaces the five built-in questions; omitted when empty; redacted and capped at 1000 characters |
 
 ## Self-test and logs
 
@@ -174,7 +184,7 @@ npm test   # node tests/unit.js && node tests/run.js && node tests/decision-mode
 
 - `tests/unit.js`: pure-function tests for path normalization, command splitting, token extraction, danger targets and config loading;
 - `tests/run.js`: acceptance cases through the real entry points (`--eval` / stdin), plus global invariants — no case may output allow/deny, ask must exactly match the host schema, all three version fields agree, DEFAULT_CONFIG keys match the manifest userConfig;
-- `tests/decision-model.js`: a local mock HTTP server covers the decision model's ask/silent/threshold/timeout/HTTP errors/invalid JSON/missing endpoint/redaction, with no external network access.
+- `tests/decision-model.js`: a local mock HTTP server covers the five-question request shape, ask/silent, strictness, kind derivation, timeout, HTTP errors, invalid JSON, missing dimensions, missing endpoint, redaction and the additional policy, with no external network access.
 
 CI runs a Windows / Ubuntu / macOS matrix plus a Node 16 compatibility job. When releasing, bump `version` in `marketplace.json`, `.zcode-plugin/plugin.json` and `.claude-plugin/plugin.json` together (enforced by a test).
 

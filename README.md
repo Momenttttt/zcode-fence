@@ -74,9 +74,19 @@ Bash 命令按写目标启发式判定：重定向目标、`cp` / `mv` / `tar` /
 
 ### 可选决策模型审核层（默认关闭）
 
-规则只能看形状，看不懂语义。开启后，只有前两层都沉默时才会把工具名、命令或路径、项目根发给配置的模型，问一个问题：这次操作是否该让用户确认？模型只能回 ask 或沉默，概率达到阈值（默认 0.6）才弹确认。
+规则只能看形状，看不懂语义。开启后，只有前两层都沉默时才发一次请求，把工具名、命令或路径、项目根、当前目录和可写根发给配置的模型，同时问五个问题：
 
-未配置端点、超时（默认 3500ms，上限 4000ms）、网络错误、响应不合法，一律 fail-open，确定性层的结论不受影响。发送前脱敏 API key / token / password / Authorization / 私钥块，不发送文件内容、对话历史或会话记忆；端点、模型、key、阈值、超时、headers、代理、prompt 全部可配，源码不硬编码厂商地址。
+- **数据损失**：删除、覆盖或损坏难以恢复的数据、历史、远程对象、数据库、备份、卷；
+- **系统变更**：机器级/用户级状态、服务、持久化、存储、全局包安装；
+- **外部副作用**：发布、部署、强推/镜像推/删除推、远程删除/覆盖、上传、远程 API 写操作；
+- **数据外带**：密钥、凭据、私钥或隐私数据离开本机；
+- **执行诊断**：是否执行了行为不完全可见的代码；只用于静默时区分 kind，不参与 ask。
+
+四个风险维度各有内置阈值，由 `decision_model_strictness` 一个数字档位控制：`0` 宽松、`1` 标准（默认）、`2` 严格。任一维度达到阈值即 ask；kind 取超过阈值最多（`分数 - 阈值`）的维度，并列时按影响范围从高到低（数据外带 > 外部副作用 > 不可逆损失 > 系统变更）。全部未达阈值时沉默，执行诊断分数 `≥ 0.70` 记为 `code_execution`，否则 `routine`。
+
+`decision_model_prompt` 现在追加到内置策略（`state.policy`，advisory，内置标准优先），不会替换五个内置问题；留空不发送。API key 在设置界面以敏感项掩码显示，配置文件仍明文保存。
+
+未配置端点、超时（默认 3500ms，上限 4000ms）、网络错误、响应不合法、缺少任一风险维度，一律 fail-open，确定性层的结论不受影响。发送前脱敏 API key / token / password / Authorization / 私钥块，不发送文件内容、对话历史或会话记忆；端点、模型、key、严格度、超时、headers、代理、附加策略全部可配，源码不硬编码厂商地址。
 
 ## ask-only：只加锁，不开锁
 
@@ -131,12 +141,12 @@ echo x > C:/Users/<你>/Desktop/fence-test.txt
 | `enable_decision_model` | 布尔 | `false` | 审核层总开关；关闭时不发任何网络请求 |
 | `decision_model_endpoint` | 字符串 | `""` | 完整 POST 地址；必须 https，本机/私网可用 http |
 | `decision_model_model` | 字符串 | `""` | 请求体 `model` 字段；留空不发送 |
-| `decision_model_api_key` | 字符串 | `""` | Bearer key；环境变量 `ZCODE_FENCE_DECISION_MODEL_API_KEY` 优先 |
-| `decision_model_threshold` | 字符串 | `"0.6"` | 确认概率阈值 0–1 |
+| `decision_model_api_key` | 字符串 | `""` | Bearer key；环境变量 `ZCODE_FENCE_DECISION_MODEL_API_KEY` 优先；设置界面掩码显示 |
+| `decision_model_strictness` | 数字 | `1` | 严格度：`0` 宽松、`1` 标准、`2` 严格；非法值回退 1 |
 | `decision_model_timeout_ms` | 字符串 | `"3500"` | 超时毫秒，上限 4000（hook 总超时 5000） |
 | `decision_model_headers` | 字符串 | `""` | 额外请求头，分号分隔 `Name: Value` |
 | `decision_model_proxy` | 字符串 | `""` | `http://` 代理；留空读环境代理，NO_PROXY 与本机直连 |
-| `decision_model_prompt` | 字符串 | `""` | 可选，覆盖「是否该让用户确认」的提示词 |
+| `decision_model_prompt` | 字符串 | `""` | 可选，追加到内置策略（`state.policy`），不替换五个内置问题；留空不发送；脱敏后截断到 1000 字符 |
 
 ## 自测与日志
 
@@ -174,7 +184,7 @@ npm test   # node tests/unit.js && node tests/run.js && node tests/decision-mode
 
 - `tests/unit.js`：路径归一化、命令切分、token 提取、灾难目标、配置读取等纯函数单测；
 - `tests/run.js`：验收用例全部走真实入口（`--eval` / stdin），并扫描全局不变量——任何用例不得输出 allow/deny、ask 必须精确匹配宿主 schema、三处版本号一致、DEFAULT_CONFIG 与清单 userConfig 键一致；
-- `tests/decision-model.js`：本地 mock HTTP 服务覆盖决策模型的 ask/silent/阈值/超时/HTTP 错误/非法 JSON/未配置端点/脱敏，不访问外网。
+- `tests/decision-model.js`：本地 mock HTTP 服务覆盖决策模型的五问请求形状、ask/silent、严格度、kind 派生、超时、HTTP 错误、非法 JSON、缺失维度、未配置端点、脱敏与附加策略，不访问外网。
 
 CI 跑 Windows / Ubuntu / macOS 三平台矩阵，另有 Node 16 兼容作业。发版时同步修改 `marketplace.json`、`.zcode-plugin/plugin.json` 和 `.claude-plugin/plugin.json` 三处 `version`（有测试把关）。
 

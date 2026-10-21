@@ -1,6 +1,6 @@
 {
   "name": "zcode-fence",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies; covers irreversible git and system persistence, with an optional decision-model review layer.",
   "description_i18n": {
     "en": "Windows-first workspace fence and catastrophic-command gate for ZCode. Deterministic rules, ask-only, zero dependencies; covers irreversible git and system persistence, with an optional decision-model review layer.",
