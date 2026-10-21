@@ -196,6 +196,20 @@ function staticChecks() {
   } catch (e) {
     errs.push('DEFAULT_CONFIG 与 plugin.json userConfig 键不一致（新增配置必须同时改代码与两份清单）');
   }
+  // v1.5.0：旧阈值废弃，严格度只暴露一个数字档位，API key 由宿主掩码
+  const uc = pj.userConfig || {};
+  if (Object.prototype.hasOwnProperty.call(uc, 'decision_model_threshold') ||
+      Object.prototype.hasOwnProperty.call(guard.DEFAULT_CONFIG, 'decision_model_threshold')) {
+    errs.push('仍包含已废弃的 decision_model_threshold');
+  }
+  const strict = uc.decision_model_strictness;
+  if (!strict || strict.type !== 'number' || strict.default !== 1) {
+    errs.push('decision_model_strictness 必须是 type=number、default=1');
+  }
+  const apiKey = uc.decision_model_api_key;
+  if (!apiKey || apiKey.sensitive !== true) {
+    errs.push('decision_model_api_key 必须标记 sensitive: true');
+  }
 
   const hj = JSON.parse(fs.readFileSync(path.join(ROOT, 'plugins', 'zcode-fence', 'hooks', 'hooks.json'), 'utf8'));
   const groups = hj.hooks && hj.hooks.PreToolUse;

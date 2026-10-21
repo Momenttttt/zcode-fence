@@ -174,21 +174,47 @@ t('坏配置 → 默认值 + 留痕', () => {
 t('清单切分容忍空段', () => assert.deepStrictEqual(guard.splitList('a;; b '), ['a', 'b']));
 
 console.log('== 决策模型配置与安全 ==');
-t('阈值与超时钳制（阈值 0..1、超时 100..4000）', () => {
-  const f = path.join(cfgTmp, 'dm-clamp.json');
+t('严格度归一：只接受 0/1/2（数字或数字字符串）', () => {
+  for (const v of [0, 1, 2, '0', '1', '2', ' 2 ']) {
+    const r = guard.normalizeStrictness(v);
+    assert.strictEqual(r.value, Number(v), JSON.stringify(v));
+    assert.strictEqual(r.note, null, JSON.stringify(v));
+  }
+});
+t('严格度非法/空值回退 1 并留痕（空串不能当 0）', () => {
+  for (const v of ['', '  ', null, '3', 'abc', 3, -1, 1.5, true, {}]) {
+    const r = guard.normalizeStrictness(v);
+    assert.strictEqual(r.value, 1, JSON.stringify(v));
+    assert.ok(r.note, JSON.stringify(v) + ' 应留痕');
+  }
+  assert.strictEqual(guard.normalizeStrictness(undefined).value, 1);
+  assert.strictEqual(guard.normalizeStrictness(undefined).note, null);
+});
+t('三档阈值与 spec 一致', () => {
+  assert.deepStrictEqual(guard.STRICTNESS_PRESETS, {
+    0: { q_loss: 0.70, q_system: 0.65, q_external: 0.75, q_exfil: 0.75 },
+    1: { q_loss: 0.80, q_system: 0.75, q_external: 0.85, q_exfil: 0.85 },
+    2: { q_loss: 0.85, q_system: 0.80, q_external: 0.90, q_exfil: 0.90 },
+  });
+});
+t('配置读取：strictness 生效；旧 threshold 忽略并留痕；超时钳制', () => {
+  const f = path.join(cfgTmp, 'dm-strict.json');
   fs.writeFileSync(f, JSON.stringify({ plugins: { options: { 'zcode-fence@m': {
-    decision_model_threshold: '5', decision_model_timeout_ms: '99999',
+    decision_model_strictness: '2', decision_model_threshold: '0.1', decision_model_timeout_ms: '99999',
   } } } }));
-  const r1 = guard.loadConfig({ ZCODE_FENCE_CONFIG: f }).cfg;
-  assert.strictEqual(r1.decision_model_threshold, 1);
-  assert.strictEqual(r1.decision_model_timeout_ms, 4000);
+  const r = guard.loadConfig({ ZCODE_FENCE_CONFIG: f });
+  assert.strictEqual(r.cfg.decision_model_strictness, 2);
+  assert.strictEqual(r.cfg.decision_model_timeout_ms, 4000);
+  assert.ok(!('decision_model_threshold' in r.cfg));
+  assert.ok(r.notes.some((x) => x.indexOf('decision_model_threshold 已废弃') >= 0), r.notes.join('|'));
   fs.writeFileSync(f, JSON.stringify({ plugins: { options: { 'zcode-fence@m': {
-    decision_model_threshold: '-1', decision_model_timeout_ms: '50', enable_decision_model: 'true',
+    decision_model_strictness: '9', decision_model_timeout_ms: '50', enable_decision_model: 'true',
   } } } }));
-  const r2 = guard.loadConfig({ ZCODE_FENCE_CONFIG: f }).cfg;
-  assert.strictEqual(r2.decision_model_threshold, 0);
-  assert.strictEqual(r2.decision_model_timeout_ms, 100);
-  assert.strictEqual(r2.enable_decision_model, true);
+  const r2 = guard.loadConfig({ ZCODE_FENCE_CONFIG: f });
+  assert.strictEqual(r2.cfg.decision_model_strictness, 1);
+  assert.strictEqual(r2.cfg.decision_model_timeout_ms, 100);
+  assert.strictEqual(r2.cfg.enable_decision_model, true);
+  assert.ok(r2.notes.some((x) => x.indexOf('非法') >= 0), r2.notes.join('|'));
 });
 t('端点校验：https 任意，http 仅本机/私网', () => {
   assert.ok(guard.parseModelEndpoint('https://api.example.com/v1/systemone'));

@@ -194,6 +194,45 @@ async function runCase(extraCfg, command) {
     assert.strictEqual(rec.decision_model.kind, 'irreversible_loss');
   });
 
+  await t('严格度切换：同一组分数在 2 / 1 / 0 下产生不同裁决', async () => {
+    // q_system 0.78：档 2（0.80）silent；档 1（0.75）ask
+    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.78, 'q_system')), delay: 0 };
+    const s2 = await runCase({ decision_model_strictness: '2' });
+    assert.strictEqual(s2.r.out.trim(), '');
+    assert.strictEqual(s2.rec.decision_model.outcome, 'silent');
+    assert.strictEqual(s2.rec.decision_model.strictness, 2);
+    assert.strictEqual(s2.rec.decision_model.thresholds.q_system, 0.80);
+    const s1 = await runCase({ decision_model_strictness: '1' });
+    assert.ok(s1.r.out.trim(), '标准档应 ask');
+    assert.strictEqual(s1.rec.decision_model.outcome, 'ask');
+    // q_loss 0.72：档 1（0.80）silent；档 0（0.70）ask
+    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.72, 'q_loss')), delay: 0 };
+    const l1 = await runCase({ decision_model_strictness: '1' });
+    assert.strictEqual(l1.r.out.trim(), '');
+    const l0 = await runCase({ decision_model_strictness: '0' });
+    assert.ok(l0.r.out.trim(), '宽松档应 ask');
+    assert.strictEqual(l0.rec.decision_model.outcome, 'ask');
+    assert.strictEqual(l0.rec.decision_model.strictness, 0);
+    assert.strictEqual(l0.rec.decision_model.thresholds.q_loss, 0.70);
+  });
+
+  await t('非法严格度 → 回退 1 并在 config_notes 留痕', async () => {
+    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.74, 'q_system')), delay: 0 };
+    const { r, rec } = await runCase({ decision_model_strictness: '9' });
+    assert.strictEqual(r.out.trim(), '', '0.74 在标准档应 silent；若被当成宽松档会 ask');
+    assert.strictEqual(rec.decision_model.strictness, 1);
+    assert.ok(rec.config_notes.some((x) => x.indexOf('非法') >= 0), JSON.stringify(rec.config_notes));
+  });
+
+  await t('旧 decision_model_threshold 被忽略并留痕', async () => {
+    // 旧阈值 0.1 若仍生效会把 0.5 判成 ask
+    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.5, 'q_system')), delay: 0 };
+    const { r, rec } = await runCase({ decision_model_threshold: '0.1' });
+    assert.strictEqual(r.out.trim(), '');
+    assert.strictEqual(rec.decision_model.outcome, 'silent');
+    assert.ok(rec.config_notes.some((x) => x.indexOf('已废弃') >= 0), JSON.stringify(rec.config_notes));
+  });
+
   await t('多维度跨阈值 → 取 margin 最大者', async () => {
     // system margin 0.23 > loss margin 0.15
     behavior = {

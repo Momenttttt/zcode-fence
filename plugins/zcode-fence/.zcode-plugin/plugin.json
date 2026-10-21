@@ -80,14 +80,15 @@
     "decision_model_api_key": {
       "type": "string",
       "default": "",
+      "sensitive": true,
       "title": "决策模型 API Key",
-      "description": "作为 Authorization: Bearer 发送；环境变量 ZCODE_FENCE_DECISION_MODEL_API_KEY 优先。"
+      "description": "作为 Authorization: Bearer 发送；环境变量 ZCODE_FENCE_DECISION_MODEL_API_KEY 优先。设置界面不显示明文，配置文件仍明文保存。"
     },
-    "decision_model_threshold": {
-      "type": "string",
-      "default": "0.6",
-      "title": "决策模型阈值",
-      "description": "0 到 1 的小数。模型给出的确认概率达到阈值才弹确认，默认 0.6。"
+    "decision_model_strictness": {
+      "type": "number",
+      "default": 1,
+      "title": "决策模型严格度",
+      "description": "0=宽松、1=标准（默认）、2=严格。只调整四个风险维度的内置阈值，具体数值不单独配置。"
     },
     "decision_model_timeout_ms": {
       "type": "string",

@@ -56,7 +56,7 @@ const DEFAULT_CONFIG = {
   decision_model_endpoint: '',
   decision_model_model: '',
   decision_model_api_key: '',
-  decision_model_threshold: 0.6,
+  decision_model_strictness: 1,
   decision_model_timeout_ms: 3500,
   decision_model_headers: '',
   decision_model_proxy: '',
@@ -67,6 +67,22 @@ function clampNumber(v, dflt, min, max) {
   const n = typeof v === 'number' ? v : parseFloat(String(v == null ? '' : v).trim());
   if (!isFinite(n)) return dflt;
   return Math.min(max, Math.max(min, n));
+}
+
+// 严格度：只接受 0/1/2（数字或对应数字字符串）；空值/非法值回退标准档并留痕
+function normalizeStrictness(v) {
+  if (v === undefined) return { value: DEFAULT_STRICTNESS, note: null };
+  if (v === null) return { value: DEFAULT_STRICTNESS, note: 'decision_model_strictness 为空，回退 1（标准）' };
+  if (typeof v === 'number' && (v === 0 || v === 1 || v === 2)) return { value: v, note: null };
+  if (typeof v === 'string') {
+    const t = v.trim();
+    if (/^[012]$/.test(t)) return { value: Number(t), note: null };
+    if (!t) return { value: DEFAULT_STRICTNESS, note: 'decision_model_strictness 为空，回退 1（标准）' };
+  }
+  return {
+    value: DEFAULT_STRICTNESS,
+    note: 'decision_model_strictness 非法（' + String(v) + '），回退 1（标准）',
+  };
 }
 
 // 每次工具调用现读 ~/.zcode/cli/config.json，改完即生效
@@ -101,7 +117,12 @@ function loadConfig(env) {
           cfg.decision_model_endpoint = typeof user.decision_model_endpoint === 'string' ? user.decision_model_endpoint.trim() : '';
           cfg.decision_model_model = typeof user.decision_model_model === 'string' ? user.decision_model_model.trim() : '';
           cfg.decision_model_api_key = typeof user.decision_model_api_key === 'string' ? user.decision_model_api_key : '';
-          cfg.decision_model_threshold = clampNumber(user.decision_model_threshold, 0.6, 0, 1);
+          if (Object.prototype.hasOwnProperty.call(user, 'decision_model_threshold')) {
+            notes.push('decision_model_threshold 已废弃，忽略（严格度改用 decision_model_strictness 0/1/2）');
+          }
+          const st = normalizeStrictness(user.decision_model_strictness);
+          cfg.decision_model_strictness = st.value;
+          if (st.note) notes.push(st.note);
           cfg.decision_model_timeout_ms = Math.round(clampNumber(user.decision_model_timeout_ms, 3500, 100, 4000));
           cfg.decision_model_headers = typeof user.decision_model_headers === 'string' ? user.decision_model_headers : '';
           cfg.decision_model_proxy = typeof user.decision_model_proxy === 'string' ? user.decision_model_proxy.trim() : '';
@@ -2201,7 +2222,7 @@ function httpPostJson(endpoint, proxy, extraHeaders, bodyObj, timeoutMs, cb) {
 
 async function decisionModelJudge(payload, judged, env) {
   const cfg = judged.ctx.cfg;
-  const strictness = DEFAULT_STRICTNESS;
+  const strictness = cfg.decision_model_strictness;
   const thresholds = STRICTNESS_PRESETS[strictness];
   const rec = {
     enabled: true, invoked: false, model: cfg.decision_model_model || '',
@@ -2433,6 +2454,7 @@ module.exports = {
   realPathBest,
   isDangerTarget,
   loadConfig,
+  normalizeStrictness,
   splitList,
   dataDir,
   loadSessionRoots,
