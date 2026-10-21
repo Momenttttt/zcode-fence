@@ -111,8 +111,8 @@
     "decision_model_prompt": {
       "type": "string",
       "default": "",
-      "title": "决策模型提示词覆盖",
-      "description": "可选，替换“是否该让用户确认”问题的 instructions；不发送文件内容、对话历史或会话记忆。"
+      "title": "决策模型附加策略",
+      "description": "可选，追加到内置五问策略之后（advisory；内置 criteria 优先），不会替换五个内置问题；留空不发送。发送前脱敏并截断到 1000 字符。"
     }
   }
 }

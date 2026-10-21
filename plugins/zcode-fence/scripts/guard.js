@@ -1902,8 +1902,10 @@ function writeLog(record, env, enabled) {
  * ================================================================ */
 
 const MODEL_MAX_INPUT_CHARS = 2000;
+const MODEL_MAX_POLICY_CHARS = 1000;
 const OPAQUE_THRESHOLD = 0.70;        // 执行诊断阈值，不随严格度变化
 const MODEL_POLICY_HINT = 'Apply state.policy if present.';
+const MODEL_POLICY_PREFIX = 'Additional policy (advisory; the built-in criteria take precedence):\n';
 
 // 四个硬维度：数组顺序 = 并列时的 scope 优先级（高 → 低）
 const MODEL_HARD_DIMENSIONS = [
@@ -2125,17 +2127,33 @@ function decideModelAnswers(scores, opaque, thresholds) {
   return { kind: tied[0].kind, trigger: tied[0], thresholds, margins, crossed: crossedKinds };
 }
 
-function modelQuestions() {
+function modelQuestions(includePolicy) {
   const out = {};
   for (const key of Object.keys(MODEL_QUESTIONS)) {
     const q = MODEL_QUESTIONS[key];
     out[key] = {
       type: 'noul',
-      instructions: q.instructions,
+      instructions: q.instructions + (includePolicy ? ' ' + MODEL_POLICY_HINT : ''),
       criteria: { true: q.criteria.true, false: q.criteria.false },
     };
   }
   return out;
+}
+
+/**
+ * 自定义提示词只作为附加策略：脱敏、截断后放进 state.policy，
+ * 不替换任何内置问题；空值返回空文本（不发送 policy、不追加短引用）。
+ */
+function modelPolicy(raw, apiKey) {
+  const cleaned = sanitizeModelInput(String(raw == null ? '' : raw), apiKey).trim();
+  if (!cleaned) return { text: '', chars: 0, truncated: false };
+  const truncated = cleaned.length > MODEL_MAX_POLICY_CHARS;
+  const body = truncated ? cleaned.slice(0, MODEL_MAX_POLICY_CHARS) : cleaned;
+  return {
+    text: MODEL_POLICY_PREFIX + body,
+    chars: cleaned.length,
+    truncated,
+  };
 }
 
 /**
@@ -2233,14 +2251,17 @@ async function decisionModelJudge(payload, judged, env) {
     rec.error = why;
     return { reason: null, record: rec };
   };
+  const apiKey = env.ZCODE_FENCE_DECISION_MODEL_API_KEY ||
+    env.DECISION_MODEL_API_KEY || cfg.decision_model_api_key || '';
+  const policy = modelPolicy(cfg.decision_model_prompt, apiKey);
+  rec.custom_policy_chars = policy.chars;
+  rec.custom_policy_truncated = policy.truncated;
   const endpoint = parseModelEndpoint(cfg.decision_model_endpoint);
   if (!cfg.decision_model_endpoint) return fail('端点未配置');
   if (!endpoint) return fail('端点非法（必须是 https，或本机/私网 http）');
   const proxy = resolveProxy(endpoint, cfg, env);
   if (proxy.error) return fail(proxy.error);
 
-  const apiKey = env.ZCODE_FENCE_DECISION_MODEL_API_KEY ||
-    env.DECISION_MODEL_API_KEY || cfg.decision_model_api_key || '';
   const headers = parseModelHeaders(cfg.decision_model_headers);
   if (apiKey && !Object.keys(headers).some((k) => k.toLowerCase() === 'authorization')) {
     headers.Authorization = 'Bearer ' + apiKey;
@@ -2253,8 +2274,9 @@ async function decisionModelJudge(payload, judged, env) {
       input,
       project_root: judged.ctx.projectDir || '',
     },
-    questions: modelQuestions(),
+    questions: modelQuestions(!!policy.text),
   };
+  if (policy.text) body.state.policy = policy.text;
   // 当前目录只在能归一为绝对路径时发送；可写根仅在非空时发送
   if (judged.ctx.cwd) body.state.cwd = judged.ctx.cwd;
   if (judged.ctx.roots && judged.ctx.roots.length) body.state.allowed_roots = judged.ctx.roots.slice();
@@ -2474,6 +2496,7 @@ module.exports = {
   parseModelAnswers,
   decideModelAnswers,
   modelQuestions,
+  modelPolicy,
   STRICTNESS_PRESETS,
   DEFAULT_STRICTNESS,
   parseModelHeaders,

@@ -233,6 +233,58 @@ async function runCase(extraCfg, command) {
     assert.ok(rec.config_notes.some((x) => x.indexOf('已废弃') >= 0), JSON.stringify(rec.config_notes));
   });
 
+  await t('自定义提示词 → state.policy，内置五问仍在，短引用追加', async () => {
+    behavior = { status: 200, body: JSON.stringify(answer({})), delay: 0 };
+    lastBody = null;
+    const prompt = 'Prefer caution for deploy scripts.';
+    const { r, rec } = await runCase({ decision_model_prompt: prompt });
+    assert.strictEqual(r.out.trim(), '', '自定义策略不能单独把低分变成 ask');
+    assert.strictEqual(lastBody.state.policy,
+      'Additional policy (advisory; the built-in criteria take precedence):\n' + prompt);
+    assert.deepStrictEqual(Object.keys(lastBody.questions), QUESTION_KEYS);
+    for (const key of QUESTION_KEYS) {
+      assert.ok(lastBody.questions[key].instructions.endsWith('Apply state.policy if present.'), key);
+      assert.ok(lastBody.questions[key].criteria.true, key);
+    }
+    assert.strictEqual(rec.decision_model.custom_policy_chars, prompt.length);
+    assert.strictEqual(rec.decision_model.custom_policy_truncated, false);
+  });
+
+  await t('自定义提示词超长 → 截断到 1000 并在日志标记', async () => {
+    behavior = { status: 200, body: JSON.stringify(answer({})), delay: 0 };
+    lastBody = null;
+    const { rec } = await runCase({ decision_model_prompt: 'x'.repeat(1200) });
+    const prefix = 'Additional policy (advisory; the built-in criteria take precedence):\n';
+    assert.strictEqual(lastBody.state.policy, prefix + 'x'.repeat(1000));
+    assert.strictEqual(rec.decision_model.custom_policy_chars, 1200);
+    assert.strictEqual(rec.decision_model.custom_policy_truncated, true);
+  });
+
+  await t('空白提示词 → 请求体与无自定义提示词完全一致', async () => {
+    behavior = { status: 200, body: JSON.stringify(answer({})), delay: 0 };
+    lastBody = null;
+    await runCase({ decision_model_prompt: '' });
+    const without = JSON.stringify(lastBody);
+    lastBody = null;
+    await runCase({ decision_model_prompt: '   ' });
+    const blank = JSON.stringify(lastBody);
+    assert.strictEqual(blank, without);
+    const parsed = JSON.parse(without);
+    assert.strictEqual(parsed.state.policy, undefined);
+    for (const key of QUESTION_KEYS) {
+      assert.ok(parsed.questions[key].instructions.indexOf('Apply state.policy') < 0, key);
+    }
+  });
+
+  await t('自定义提示词发送前脱敏', async () => {
+    behavior = { status: 200, body: JSON.stringify(answer({})), delay: 0 };
+    lastBody = null;
+    const { rec } = await runCase({ decision_model_prompt: 'token="hunter2secret" please' });
+    assert.ok(lastBody.state.policy.indexOf('hunter2secret') < 0, lastBody.state.policy);
+    assert.ok(lastBody.state.policy.indexOf('[REDACTED]') >= 0, lastBody.state.policy);
+    assert.strictEqual(rec.decision_model.custom_policy_chars > 0, true);
+  });
+
   await t('多维度跨阈值 → 取 margin 最大者', async () => {
     // system margin 0.23 > loss margin 0.15
     behavior = {

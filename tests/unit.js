@@ -281,6 +281,33 @@ t('kind 派生：margin 最大、margin 并列按 scope、无跨阈值用 q_opaq
   assert.strictEqual(guard.decideModelAnswers(scores({}), 0.69, th).kind, 'routine');
   assert.strictEqual(guard.decideModelAnswers(scores({}), null, th).kind, 'routine');
 });
+t('附加策略：脱敏、截断到 1000、空值不发送', () => {
+  const empty = guard.modelPolicy('   ', '');
+  assert.deepStrictEqual(empty, { text: '', chars: 0, truncated: false });
+  const s = guard.modelPolicy('password="hunter2secret" keep calm', '');
+  const prefix = 'Additional policy (advisory; the built-in criteria take precedence):\n';
+  assert.strictEqual(s.text.indexOf(prefix), 0);
+  assert.ok(s.text.indexOf('hunter2secret') < 0);
+  assert.ok(s.text.indexOf('[REDACTED]') >= 0);
+  assert.strictEqual(s.truncated, false);
+  const long = guard.modelPolicy('x'.repeat(1200), '');
+  assert.strictEqual(long.truncated, true);
+  assert.strictEqual(long.chars, 1200);
+  assert.strictEqual(long.text.length, prefix.length + 1000);
+});
+t('问题构造：恰好五问；仅带策略时追加短引用', () => {
+  const plain = guard.modelQuestions(false);
+  assert.deepStrictEqual(Object.keys(plain), ['q_loss', 'q_system', 'q_external', 'q_exfil', 'q_opaque']);
+  for (const key of Object.keys(plain)) {
+    assert.strictEqual(plain[key].type, 'noul');
+    assert.ok(plain[key].instructions.indexOf('Apply state.policy') < 0, key);
+    assert.ok(plain[key].criteria.true && plain[key].criteria.false, key);
+  }
+  const withPolicy = guard.modelQuestions(true);
+  for (const key of Object.keys(withPolicy)) {
+    assert.ok(withPolicy[key].instructions.endsWith('Apply state.policy if present.'), key);
+  }
+});
 t('发送前脱敏：API key/password/Bearer/私钥块/长密钥', () => {
   const key = 'sk-live-abcdefghijklmnop';
   const nl = String.fromCharCode(10);
