@@ -4,9 +4,10 @@
  * 决策模型审核层测试 —— 本地 mock HTTP 服务，不访问外网。
  * 运行：node tests/decision-model.js
  *
- * 覆盖：ask/silent/阈值、超时、HTTP 错误、非法 JSON、answers 缺失、未配置端点、
- *       非本地 http 拒绝、确定性层已 ask 不调用、默认关闭不请求、localhost 绕过代理、
- *       发送前脱敏与数据最小化、日志留痕。
+ * 覆盖：B5 五问请求形状、默认严格度下的 ask/silent、kind 派生（margin/scope）、
+ *       q_opaque 执行诊断、q_opaque 缺失、旧协议 fail-open、超时、HTTP 错误、
+ *       非法 JSON、硬维度缺失、未配置端点、确定性层已 ask 不调用、默认关闭不请求、
+ *       localhost 绕过代理、发送前脱敏与数据最小化、日志留痕。
  */
 
 const assert = require('assert');
@@ -37,13 +38,19 @@ let behavior = { status: 200, body: null, delay: 0 };
 let hits = 0;
 let lastBody = null;
 
-function defaultAnswer(score, kind) {
-  return {
-    answers: {
-      ask: { noul: score },
-      kind: { choice: kind || 'data_deletion' },
-    },
-  };
+const QUESTION_KEYS = ['q_loss', 'q_system', 'q_external', 'q_exfil', 'q_opaque'];
+
+// 五个答案；未指定的维度默认 0.01，q_opaque 默认 0.2
+function answer(scores, opaque) {
+  const all = Object.assign({ q_loss: 0.01, q_system: 0.01, q_external: 0.01, q_exfil: 0.01 }, scores || {});
+  const answers = {};
+  for (const key of QUESTION_KEYS.slice(0, 4)) answers[key] = { type: 'noul', noul: all[key] };
+  if (opaque !== undefined) answers.q_opaque = { type: 'noul', noul: opaque };
+  else answers.q_opaque = { type: 'noul', noul: 0.2 };
+  return { answers };
+}
+function defaultAnswer(score, q, opaque) {
+  return answer({ [q || 'q_system']: score }, opaque);
 }
 
 const server = http.createServer((req, res) => {
@@ -73,7 +80,6 @@ function writeConfig(dir, extra) {
       enable_decision_model: 'true',
       decision_model_endpoint: baseUrl,
       decision_model_model: 'fake-model',
-      decision_model_threshold: '0.6',
       decision_model_timeout_ms: '500',
     }, extra || {}),
   });
@@ -131,6 +137,13 @@ function caseDir() {
   return path.join(TMP, 'case-' + seq);
 }
 
+async function runCase(extraCfg, command) {
+  const dir = caseDir();
+  const env = baseEnv(writeConfig(dir, extraCfg), dir);
+  const r = await runGuard(env, bashPayload(command || 'echo hi'));
+  return { r, env, rec: readLastLog(env) };
+}
+
 /* ---------- 用例 ---------- */
 
 (async function main() {
@@ -138,49 +151,171 @@ function caseDir() {
   const port = server.address().port;
   baseUrl = 'http://127.0.0.1:' + port + '/v1/systemone';
 
-  await t('概率达到阈值 → ask，理由含类别与分数', async () => {
-    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.91, 'data_deletion')), delay: 0 };
+  await t('q_system 0.98 → ask，理由含 kind/问题名/分数/阈值/strictness', async () => {
+    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.98, 'q_system')), delay: 0 };
     hits = 0; lastBody = null;
-    const dir = caseDir();
-    const env = baseEnv(writeConfig(dir), dir);
-    const r = await runGuard(env, bashPayload('echo hi'));
+    const { r, rec } = await runCase();
     assert.strictEqual(r.code, 0);
     assert.ok(r.out.trim(), '期望 ask 输出');
     const j = JSON.parse(r.out);
-    const reason = j.hookSpecificOutput.permissionDecisionReason;
-    assert.ok(reason.indexOf('[zcode-fence: 决策模型]') === 0, reason);
-    assert.ok(reason.indexOf('data_deletion') >= 0, reason);
-    assert.ok(reason.indexOf('0.91') >= 0, reason);
+    assert.strictEqual(j.hookSpecificOutput.permissionDecision,
+      'ask');
+    assert.strictEqual(j.hookSpecificOutput.permissionDecisionReason,
+      '[zcode-fence: 决策模型] 建议确认：system_change（q_system 0.98 ≥ 0.75；strictness=1）');
     assert.strictEqual(hits, 1);
-    const rec = readLastLog(env);
     assert.strictEqual(rec.decision_model.outcome, 'ask');
-    assert.strictEqual(rec.decision_model.score, 0.91);
-    assert.strictEqual(rec.decision_model.kind, 'data_deletion');
+    assert.strictEqual(rec.decision_model.kind, 'system_change');
+    assert.strictEqual(rec.decision_model.strictness, 1);
     assert.strictEqual(rec.decision_model.model, 'fake-model');
+    assert.strictEqual(rec.decision_model.scores.q_system, 0.98);
+    assert.strictEqual(rec.decision_model.scores.q_opaque, 0.2);
+    assert.strictEqual(rec.decision_model.thresholds.q_system, 0.75);
+    assert.ok(Math.abs(rec.decision_model.margins.q_system - 0.23) < 1e-9);
+    assert.deepStrictEqual(rec.decision_model.crossed, ['system_change']);
+    assert.strictEqual(rec.decision_model.opaque_missing, false);
+    assert.strictEqual(typeof rec.decision_model.elapsed_ms, 'number');
   });
 
-  await t('概率低于阈值 → silent', async () => {
-    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.2)), delay: 0 };
+  await t('q_system 0.74 → silent（低于阈值）', async () => {
+    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.74, 'q_system')), delay: 0 };
     hits = 0;
-    const dir = caseDir();
-    const env = baseEnv(writeConfig(dir), dir);
-    const r = await runGuard(env, bashPayload('echo hi'));
+    const { r, rec } = await runCase();
     assert.strictEqual(r.out.trim(), '');
     assert.strictEqual(hits, 1);
-    const rec = readLastLog(env);
     assert.strictEqual(rec.decision_model.outcome, 'silent');
+    assert.deepStrictEqual(rec.decision_model.crossed, []);
+    assert.strictEqual(rec.decision_model.kind, 'routine');
   });
 
-  await t('阈值可配：0.5 分在阈值 0.6 下 silent、在 0.4 下 ask', async () => {
-    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.5)), delay: 0 };
-    const dir1 = caseDir();
-    const env1 = baseEnv(writeConfig(dir1), dir1);
-    const r1 = await runGuard(env1, bashPayload('echo hi'));
-    assert.strictEqual(r1.out.trim(), '');
-    const dir2 = caseDir();
-    const env2 = baseEnv(writeConfig(dir2, { decision_model_threshold: '0.4' }), dir2);
-    const r2 = await runGuard(env2, bashPayload('echo hi'));
-    assert.ok(r2.out.trim(), '阈值 0.4 时应 ask');
+  await t('q_loss 0.80 等于阈值 → ask', async () => {
+    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.80, 'q_loss')), delay: 0 };
+    const { r, rec } = await runCase();
+    assert.ok(r.out.trim(), '等于阈值也应 ask');
+    assert.strictEqual(rec.decision_model.kind, 'irreversible_loss');
+  });
+
+  await t('多维度跨阈值 → 取 margin 最大者', async () => {
+    // system margin 0.23 > loss margin 0.15
+    behavior = {
+      status: 200,
+      body: JSON.stringify(answer({ q_system: 0.98, q_loss: 0.95 })),
+      delay: 0,
+    };
+    const { rec } = await runCase();
+    assert.strictEqual(rec.decision_model.kind, 'system_change');
+    assert.deepStrictEqual(rec.decision_model.crossed.sort(), ['irreversible_loss', 'system_change']);
+  });
+
+  await t('margin 并列 → 按 scope（exfil > external > loss > system）', async () => {
+    // loss 与 system margin 都是 0.15
+    behavior = {
+      status: 200,
+      body: JSON.stringify(answer({ q_loss: 0.95, q_system: 0.90 })),
+      delay: 0,
+    };
+    const { rec } = await runCase();
+    assert.strictEqual(rec.decision_model.kind, 'irreversible_loss');
+  });
+
+  await t('无硬维度跨阈值 + q_opaque 0.92 → silent + code_execution', async () => {
+    behavior = { status: 200, body: JSON.stringify(answer({}, 0.92)), delay: 0 };
+    const { r, rec } = await runCase();
+    assert.strictEqual(r.out.trim(), '');
+    assert.strictEqual(rec.decision_model.outcome, 'silent');
+    assert.strictEqual(rec.decision_model.kind, 'code_execution');
+    assert.strictEqual(rec.decision_model.scores.q_opaque, 0.92);
+  });
+
+  await t('q_opaque 缺失 → 仍可判定，kind=routine 且日志 opaque_missing', async () => {
+    const parsed = answer({});
+    delete parsed.answers.q_opaque;
+    behavior = { status: 200, body: JSON.stringify(parsed), delay: 0 };
+    const { r, rec } = await runCase();
+    assert.strictEqual(r.out.trim(), '');
+    assert.strictEqual(rec.decision_model.outcome, 'silent');
+    assert.strictEqual(rec.decision_model.kind, 'routine');
+    assert.strictEqual(rec.decision_model.scores.q_opaque, null);
+    assert.strictEqual(rec.decision_model.opaque_missing, true);
+  });
+
+  await t('旧单问响应（answers.ask/kind）→ fail-open 并留痕', async () => {
+    behavior = {
+      status: 200,
+      body: JSON.stringify({ answers: { ask: { noul: 0.9 }, kind: { choice: 'data_deletion' } } }),
+      delay: 0,
+    };
+    const { r, rec } = await runCase();
+    assert.strictEqual(r.out.trim(), '');
+    assert.strictEqual(rec.decision_model.outcome, 'fail-open');
+    assert.ok(/answers\.q_loss/.test(rec.decision_model.error), rec.decision_model.error);
+  });
+
+  await t('缺少任一硬维度 → fail-open 且指出缺失项', async () => {
+    const parsed = answer({ q_loss: 0.95 });
+    delete parsed.answers.q_exfil;
+    behavior = { status: 200, body: JSON.stringify(parsed), delay: 0 };
+    const { r, rec } = await runCase();
+    assert.strictEqual(r.out.trim(), '');
+    assert.strictEqual(rec.decision_model.outcome, 'fail-open');
+    assert.strictEqual(rec.decision_model.error, '响应缺少 answers.q_exfil');
+  });
+
+  await t('请求形状：一次 POST、五问、state 含 cwd/allowed_roots', async () => {
+    behavior = { status: 200, body: JSON.stringify(answer({}, 0.2)), delay: 0 };
+    hits = 0;
+    lastBody = null;
+    const { r } = await runCase();
+    assert.strictEqual(r.out.trim(), '');
+    assert.ok(lastBody, '应收到请求体');
+    assert.deepStrictEqual(Object.keys(lastBody.questions), QUESTION_KEYS);
+    for (const key of QUESTION_KEYS) {
+      assert.strictEqual(lastBody.questions[key].type, 'noul', key);
+      assert.ok(lastBody.questions[key].instructions, key + ' 缺 instructions');
+      assert.ok(lastBody.questions[key].criteria.true, key + ' 缺 criteria.true');
+      assert.ok(lastBody.questions[key].criteria.false, key + ' 缺 criteria.false');
+    }
+    assert.strictEqual(lastBody.questions.ask, undefined);
+    assert.strictEqual(lastBody.questions.kind, undefined);
+    assert.deepStrictEqual(Object.keys(lastBody.state).sort(),
+      ['allowed_roots', 'cwd', 'input', 'project_root', 'tool']);
+    assert.strictEqual(lastBody.state.tool, 'Bash');
+    assert.strictEqual(lastBody.state.cwd, PROJECT_REAL);
+    assert.ok(Array.isArray(lastBody.state.allowed_roots));
+    assert.ok(lastBody.state.allowed_roots.indexOf(PROJECT_REAL) >= 0,
+      JSON.stringify(lastBody.state.allowed_roots));
+    assert.strictEqual(hits, 1);
+  });
+
+  await t('cwd 不可归一为绝对路径时不发送', async () => {
+    behavior = { status: 200, body: JSON.stringify(answer({}, 0.2)), delay: 0 };
+    lastBody = null;
+    const dir = caseDir();
+    const env = baseEnv(writeConfig(dir), dir);
+    const payload = {
+      hook_event_name: 'PreToolUse', tool_name: 'Bash',
+      tool_input: { command: 'echo hi' }, session_id: 'sess-dm',
+    };
+    const r = await runGuard(env, payload);
+    assert.strictEqual(r.out.trim(), '');
+    assert.strictEqual(lastBody.state.cwd, undefined);
+    assert.ok(lastBody.state.allowed_roots, '项目根存在时仍发送 allowed_roots');
+  });
+
+  await t('无项目根时省略 allowed_roots', async () => {
+    behavior = { status: 200, body: JSON.stringify(answer({}, 0.2)), delay: 0 };
+    lastBody = null;
+    const dir = caseDir();
+    const env = baseEnv(writeConfig(dir), dir);
+    delete env.ZCODE_PROJECT_DIR;
+    const payload = {
+      hook_event_name: 'PreToolUse', tool_name: 'Bash',
+      tool_input: { command: 'echo hi' }, session_id: 'sess-dm',
+    };
+    const r = await runGuard(env, payload);
+    assert.strictEqual(r.out.trim(), '');
+    assert.strictEqual(lastBody.state.allowed_roots, undefined);
+    assert.strictEqual(lastBody.state.cwd, undefined);
+    assert.strictEqual(lastBody.state.project_root, '');
   });
 
   await t('超时 → fail-open 且留痕', async () => {
@@ -199,79 +334,56 @@ function caseDir() {
 
   await t('HTTP 500 → fail-open 且留痕', async () => {
     behavior = { status: 500, body: 'boom', delay: 0 };
-    const dir = caseDir();
-    const env = baseEnv(writeConfig(dir), dir);
-    const r = await runGuard(env, bashPayload('echo hi'));
+    const { r, rec } = await runCase();
     assert.strictEqual(r.out.trim(), '');
-    const rec = readLastLog(env);
     assert.strictEqual(rec.decision_model.outcome, 'fail-open');
     assert.ok(/HTTP 500/.test(rec.decision_model.error), rec.decision_model.error);
   });
 
   await t('响应非法 JSON → fail-open 且留痕', async () => {
     behavior = { status: 200, body: '{ not json', delay: 0 };
-    const dir = caseDir();
-    const env = baseEnv(writeConfig(dir), dir);
-    const r = await runGuard(env, bashPayload('echo hi'));
+    const { r, rec } = await runCase();
     assert.strictEqual(r.out.trim(), '');
-    const rec = readLastLog(env);
     assert.ok(/不是合法 JSON/.test(rec.decision_model.error), rec.decision_model.error);
   });
 
   await t('answers 缺失 → fail-open 且留痕', async () => {
     behavior = { status: 200, body: '{"answers":{}}', delay: 0 };
-    const dir = caseDir();
-    const env = baseEnv(writeConfig(dir), dir);
-    const r = await runGuard(env, bashPayload('echo hi'));
+    const { r, rec } = await runCase();
     assert.strictEqual(r.out.trim(), '');
-    const rec = readLastLog(env);
-    assert.ok(/answers\.ask/.test(rec.decision_model.error), rec.decision_model.error);
+    assert.ok(/answers\.q_loss/.test(rec.decision_model.error), rec.decision_model.error);
   });
 
   await t('未配置端点 → 不请求、fail-open 留痕', async () => {
     hits = 0;
-    const dir = caseDir();
-    const env = baseEnv(writeConfig(dir, { decision_model_endpoint: '' }), dir);
-    const r = await runGuard(env, bashPayload('echo hi'));
+    const { r, rec } = await runCase({ decision_model_endpoint: '' });
     assert.strictEqual(r.out.trim(), '');
     assert.strictEqual(hits, 0);
-    const rec = readLastLog(env);
     assert.strictEqual(rec.decision_model.outcome, 'fail-open');
     assert.ok(/端点未配置/.test(rec.decision_model.error));
   });
 
   await t('非本地 http 端点 → 拒绝调用、fail-open', async () => {
     hits = 0;
-    const dir = caseDir();
-    const env = baseEnv(writeConfig(dir, { decision_model_endpoint: 'http://example.com/v1/systemone' }), dir);
-    const r = await runGuard(env, bashPayload('echo hi'));
+    const { r, rec } = await runCase({ decision_model_endpoint: 'http://example.com/v1/systemone' });
     assert.strictEqual(r.out.trim(), '');
     assert.strictEqual(hits, 0);
-    const rec = readLastLog(env);
     assert.ok(/端点非法/.test(rec.decision_model.error), rec.decision_model.error);
   });
 
   await t('确定性层已 ask → 不调用模型', async () => {
     hits = 0;
-    const dir = caseDir();
-    const env = baseEnv(writeConfig(dir), dir);
-    const r = await runGuard(env, bashPayload('rm -rf /'));
+    const { r, rec } = await runCase(null, 'rm -rf /');
     assert.ok(JSON.parse(r.out).hookSpecificOutput.permissionDecisionReason.indexOf('危险命令') >= 0);
     assert.strictEqual(hits, 0);
-    const rec = readLastLog(env);
     assert.strictEqual(rec.decision_model, undefined);
   });
 
   await t('默认关闭 → 不发起任何请求', async () => {
     hits = 0;
-    const dir = caseDir();
-    const cfgDir = caseDir();
-    const cfg = writeConfig(cfgDir, { enable_decision_model: 'false' });
-    const env = baseEnv(cfg, dir);
-    const r = await runGuard(env, bashPayload('echo hi'));
+    const { r, rec } = await runCase({ enable_decision_model: 'false' });
     assert.strictEqual(r.out.trim(), '');
     assert.strictEqual(hits, 0);
-    const rec = readLastLog(env);
     assert.strictEqual(rec.decision_model, undefined);
   });
 
@@ -281,14 +393,14 @@ function caseDir() {
     const env = baseEnv(writeConfig(dir), dir);
     env.HTTP_PROXY = 'http://127.0.0.1:1';
     env.HTTPS_PROXY = 'http://127.0.0.1:1';
-    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.91)), delay: 0 };
+    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.98)), delay: 0 };
     const r = await runGuard(env, bashPayload('echo hi'));
     assert.ok(r.out.trim(), '本地端点应绕过代理并成功');
     assert.strictEqual(hits, 1);
   });
 
-  await t('发送前脱敏 + 数据最小化（只发工具名/输入/项目根）', async () => {
-    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.1)), delay: 0 };
+  await t('发送前脱敏 + 数据最小化（只发工具名/输入/项目根/cwd/可写根）', async () => {
+    behavior = { status: 200, body: JSON.stringify(answer({})), delay: 0 };
     lastBody = null;
     const dir = caseDir();
     const env = baseEnv(writeConfig(dir), dir);
@@ -303,17 +415,13 @@ function caseDir() {
     assert.ok(sent.indexOf('hunter2secret') < 0, 'password 未脱敏');
     assert.ok(sent.indexOf('abcdefghijklmnop') < 0, 'Bearer token 未脱敏');
     assert.ok(sent.indexOf('[REDACTED]') >= 0, '应出现脱敏占位');
-    assert.deepStrictEqual(Object.keys(lastBody.state).sort(), ['input', 'project_root', 'tool']);
     assert.strictEqual(lastBody.state.tool, 'Bash');
     assert.ok(lastBody.state.input.indexOf('echo hi') === 0);
     assert.strictEqual(lastBody.state.project_root, PROJECT_REAL);
-    assert.ok(lastBody.questions && lastBody.questions.ask && lastBody.questions.ask.type === 'noul');
-    assert.strictEqual(lastBody.questions.kind.type, 'choice');
-    assert.ok(lastBody.questions.kind.criteria.data_deletion);
   });
 
   await t('文件工具的路径同样送入模型', async () => {
-    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.9, 'external_side_effect')), delay: 0 };
+    behavior = { status: 200, body: JSON.stringify(answer({ q_external: 0.9 })), delay: 0 };
     lastBody = null;
     const dir = caseDir();
     const env = baseEnv(writeConfig(dir), dir);
@@ -326,28 +434,31 @@ function caseDir() {
     assert.ok(lastBody.state.input.indexOf('a.ts') >= 0);
   });
 
-  await t('兼容 probability/score 与 kind.probabilities 形态', async () => {
+  await t('兼容 probability/score 形态', async () => {
     behavior = {
       status: 200,
-      body: JSON.stringify({ answers: { ask: { probability: 0.8 }, kind: { probabilities: { read_only: 0.1, git_history: 0.9 } } } }),
+      body: JSON.stringify({ answers: {
+        q_loss: { probability: 0.9 },
+        q_system: { score: 0.01 },
+        q_external: { noul: 0.01 },
+        q_exfil: { noul: 0.01 },
+        q_opaque: { score: 0.1 },
+      } }),
       delay: 0,
     };
-    const dir = caseDir();
-    const env = baseEnv(writeConfig(dir), dir);
-    const r = await runGuard(env, bashPayload('echo hi'));
-    const reason = JSON.parse(r.out).hookSpecificOutput.permissionDecisionReason;
-    assert.ok(reason.indexOf('git_history') >= 0, reason);
+    const { r, rec } = await runCase();
+    assert.ok(r.out.trim());
+    assert.strictEqual(rec.decision_model.kind, 'irreversible_loss');
   });
 
   await t('本地 mock 配置 headers 被发送', async () => {
-    behavior = { status: 200, body: JSON.stringify(defaultAnswer(0.1)), delay: 0 };
+    behavior = { status: 200, body: JSON.stringify(answer({})), delay: 0 };
     const dir = caseDir();
     let seen = null;
-    // 用临时服务记录 header
     const srv = http.createServer((req, res) => {
       seen = req.headers;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(defaultAnswer(0.1)));
+      res.end(JSON.stringify(answer({})));
     });
     await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
     const p = srv.address().port;

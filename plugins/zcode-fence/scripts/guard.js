@@ -1875,12 +1875,92 @@ function writeLog(record, env, enabled) {
 /* ================================================================
  * 可选决策模型审核层（默认关闭）
  *
- * 只在确定性两层都 silent 时调用：单问「是否该让用户确认」+ 效果类别；
+ * 只在确定性两层都 silent 时调用：一次请求五问（四个风险维度 + 执行诊断）；
  * 模型只能产生 ask 或沉默。超时/网络错误/非法响应/未配置端点一律 fail-open
  * 并写入决策日志。零依赖（Node 内置 http/https/tls），Node 16 兼容。
  * ================================================================ */
 
 const MODEL_MAX_INPUT_CHARS = 2000;
+const OPAQUE_THRESHOLD = 0.70;        // 执行诊断阈值，不随严格度变化
+const MODEL_POLICY_HINT = 'Apply state.policy if present.';
+
+// 四个硬维度：数组顺序 = 并列时的 scope 优先级（高 → 低）
+const MODEL_HARD_DIMENSIONS = [
+  { key: 'q_exfil', kind: 'exfiltration', scope: 4 },
+  { key: 'q_external', kind: 'external_side_effect', scope: 3 },
+  { key: 'q_loss', kind: 'irreversible_loss', scope: 2 },
+  { key: 'q_system', kind: 'system_change', scope: 1 },
+];
+
+// 内置五问：问题名、语义与 criteria 见 spec 附录 A；q_opaque 只做诊断
+const MODEL_QUESTIONS = {
+  q_loss: {
+    instructions: 'Could this call delete, overwrite, or corrupt data that cannot be easily ' +
+      'recovered? True examples: git reset --hard, git clean -fdx, docker compose down -v ' +
+      '(deletes named volumes), aws s3 rm --recursive, DROP TABLE, overwriting a database or ' +
+      'backup. False examples: removing build/, dist/, node_modules/, or a cache directory.',
+    criteria: {
+      true: 'Yes: it destroys untracked or uncommitted work, databases, backups, remote objects, ' +
+        'volumes, or git history, or overwrites files with no easy undo.',
+      false: 'No: it only removes disposable build output or cache, or does not delete or ' +
+        'overwrite meaningful data.',
+    },
+  },
+  q_system: {
+    instructions: 'Does this call change machine-wide or user-wide system state, services, ' +
+      'persistence, storage, or installed packages? A global package-manager install ' +
+      '(npm install -g, pip install --user, brew/winget/choco/apt/scoop install) is ' +
+      'system-level even if the package is a dev tool.',
+    criteria: {
+      true: 'Installs or removes global packages, edits system or shell config, manages ' +
+        'services/startup/cron, partitions or mounts disks, or changes firewall/routing/drivers.',
+      false: 'Only touches project-local dependencies (node_modules, .venv), project files, ' +
+        'or disposable caches.',
+    },
+  },
+  q_external: {
+    instructions: 'Does this call cause an external side effect that is hard to undo? True ' +
+      'examples: npm publish, gh release create, git push --force/--mirror/--delete, aws s3 rm, ' +
+      'curl -X DELETE/POST/PUT/PATCH, scp upload, deployment. False examples: local ' +
+      'rm/del/cp/mv, npm install, docker build/pull, curl -s URL (a GET), gh pr view/list, ' +
+      'normal git push, requests to localhost.',
+    criteria: {
+      true: 'Publishes, deploys, force/mirror/delete pushes, deletes or overwrites remote ' +
+        'resources, uploads data, or sends POST/PUT/PATCH/DELETE to a remote service.',
+      false: 'Local filesystem operations; dependency or base-image downloads; a curl/wget/gh ' +
+        'command that only fetches (GET/HEAD, view/list); normal git push of new commits; ' +
+        'localhost or a local dev server.',
+    },
+  },
+  q_exfil: {
+    instructions: 'Does this call send credentials, secrets, private keys, or private user data ' +
+      'off the machine?',
+    criteria: {
+      true: 'Uploads or posts .env files, keys, tokens, or private files; pipes them to a ' +
+        'network tool; or embeds them in a URL or request body.',
+      false: 'No secret or private user data leaves the machine; a plain public GET is not ' +
+        'exfiltration.',
+    },
+  },
+  q_opaque: {
+    instructions: 'Does this call execute code whose full behavior is not visible in the ' +
+      'command (an interpreter, script, test runner, container, or binary)? Diagnostic only; ' +
+      'answer factually.',
+    criteria: {
+      true: 'Runs an interpreter, script, test runner, container, or binary; the full behavior ' +
+        'is not visible in the command.',
+      false: 'Only reads or writes files, or runs a command that does not execute project code.',
+    },
+  },
+};
+
+// 严格度预设：设置界面只暴露 0/1/2 一个数字档位，四个阈值不单独配置
+const STRICTNESS_PRESETS = {
+  0: { q_loss: 0.70, q_system: 0.65, q_external: 0.75, q_exfil: 0.75 },
+  1: { q_loss: 0.80, q_system: 0.75, q_external: 0.85, q_exfil: 0.85 },
+  2: { q_loss: 0.85, q_system: 0.80, q_external: 0.90, q_exfil: 0.90 },
+};
+const DEFAULT_STRICTNESS = 1;
 
 function isLocalAddress(host) {
   let h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
@@ -1966,67 +2046,75 @@ function parseModelHeaders(s) {
   return out;
 }
 
-// 解析 answers.ask 概率（noul/probability/score）与 answers.kind.choice
-function parseModelAnswer(body) {
-  if (!body || typeof body !== 'object') return null;
-  const answers = body.answers;
-  if (!answers || typeof answers !== 'object' || Array.isArray(answers)) return null;
-  const a = answers.ask;
-  if (!a || typeof a !== 'object') return null;
-  let score = a.noul != null ? a.noul : (a.probability != null ? a.probability : a.score);
-  score = Number(score);
-  if (!isFinite(score)) return null;
-  let kind = 'unknown';
-  const k = answers.kind;
-  if (k && typeof k === 'object') {
-    if (typeof k.choice === 'string' && k.choice) {
-      kind = k.choice;
-    } else if (k.probabilities && typeof k.probabilities === 'object') {
-      let best = null;
-      for (const key of Object.keys(k.probabilities)) {
-        const v = Number(k.probabilities[key]);
-        if (isFinite(v) && (best === null || v > best.v)) best = { key, v };
-      }
-      if (best) kind = best.key;
-    }
-  } else if (typeof k === 'string' && k) {
-    kind = k;
-  }
-  return { score, kind };
+// 单个 noul 答案的分数：兼容 noul / probability / score，非有限数值视为缺失
+function noulScore(answer) {
+  if (answer == null) return null;
+  if (typeof answer === 'number') return isFinite(answer) ? answer : null;
+  if (typeof answer !== 'object' || Array.isArray(answer)) return null;
+  const raw = answer.noul != null ? answer.noul
+    : (answer.probability != null ? answer.probability : answer.score);
+  if (raw == null) return null;
+  const n = Number(raw);
+  return isFinite(n) ? n : null;
 }
 
-function modelQuestions(cfg) {
-  const ask = cfg.decision_model_prompt ||
-    'This is a pre-tool-use check for an AI coding agent. Would a careful engineer want the ' +
-    'user to explicitly confirm this exact tool call before it runs? Judge only the call and ' +
-    'its stated effect; routine reads, builds, tests and writes inside the project do not need confirmation.';
-  const criteria = {
-    read_only: 'Reads or inspects data without changing state.',
-    project_write: 'Creates or modifies files inside the project; easy to undo.',
-    git_history: 'Changes git history, branches, tags, remotes, or discards uncommitted work.',
-    data_deletion: 'Deletes files or data, especially outside routine project cleanup or irreversibly.',
-    system_change: 'Changes system configuration, services, persistence, storage, or package state.',
-    external_side_effect: 'Sends data to or changes state on an external service.',
-    exfiltration: 'Moves credentials, secrets, or private user data off the machine.',
-  };
-  const questions = {
-    ask: {
+// 解析 B5 五问答案：四个硬维度必须齐全；q_opaque 可选（缺失不影响裁决）
+function parseModelAnswers(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: '响应缺少 answers' };
+  const answers = body.answers;
+  if (!answers || typeof answers !== 'object' || Array.isArray(answers)) return { error: '响应缺少 answers' };
+  const scores = {};
+  for (const key of Object.keys(MODEL_QUESTIONS)) {
+    if (key === 'q_opaque') continue;
+    const v = noulScore(answers[key]);
+    if (v == null) return { error: '响应缺少 answers.' + key };
+    scores[key] = v;
+  }
+  const opaque = noulScore(answers.q_opaque);
+  return { scores, opaque, opaqueMissing: opaque == null };
+}
+
+/**
+ * 本地裁决：任一硬维度 score >= threshold → ask；kind 取跨阈值维度中
+ * margin（score - threshold）最大者，margin 并列按 scope 从高到低，再按固定顺序。
+ * 无跨阈值时用 q_opaque >= 0.70 区分 code_execution / routine。
+ */
+function decideModelAnswers(scores, opaque, thresholds) {
+  const margins = {};
+  const crossed = [];
+  MODEL_HARD_DIMENSIONS.forEach((dim, order) => {
+    const threshold = thresholds[dim.key];
+    const margin = scores[dim.key] - threshold;
+    margins[dim.key] = margin;
+    if (scores[dim.key] >= threshold) {
+      crossed.push({
+        q: dim.key, kind: dim.kind, scope: dim.scope, order,
+        score: scores[dim.key], threshold, margin,
+      });
+    }
+  });
+  const crossedKinds = crossed.map((x) => x.kind);
+  if (!crossed.length) {
+    const kind = (opaque != null && opaque >= OPAQUE_THRESHOLD) ? 'code_execution' : 'routine';
+    return { kind, trigger: null, thresholds, margins, crossed: crossedKinds };
+  }
+  const maxMargin = Math.max.apply(null, crossed.map((x) => x.margin));
+  const tied = crossed.filter((x) => maxMargin - x.margin <= 1e-9);
+  tied.sort((a, b) => (b.scope - a.scope) || (a.order - b.order));
+  return { kind: tied[0].kind, trigger: tied[0], thresholds, margins, crossed: crossedKinds };
+}
+
+function modelQuestions() {
+  const out = {};
+  for (const key of Object.keys(MODEL_QUESTIONS)) {
+    const q = MODEL_QUESTIONS[key];
+    out[key] = {
       type: 'noul',
-      instructions: ask,
-      criteria: {
-        true: 'It may delete or overwrite data, rewrite git history, change system configuration ' +
-          'or services, execute downloaded content, send data to an external service, or ' +
-          'otherwise have effects the user should approve first.',
-        false: 'It is routine and reversible inside the project, or read-only.',
-      },
-    },
-    kind: {
-      type: 'choice',
-      instructions: 'Which best describes the effect of this tool call?',
-      criteria,
-    },
-  };
-  return questions;
+      instructions: q.instructions,
+      criteria: { true: q.criteria.true, false: q.criteria.false },
+    };
+  }
+  return out;
 }
 
 /**
@@ -2113,7 +2201,12 @@ function httpPostJson(endpoint, proxy, extraHeaders, bodyObj, timeoutMs, cb) {
 
 async function decisionModelJudge(payload, judged, env) {
   const cfg = judged.ctx.cfg;
-  const rec = { enabled: true, invoked: false, model: cfg.decision_model_model || '', outcome: 'skipped' };
+  const strictness = DEFAULT_STRICTNESS;
+  const thresholds = STRICTNESS_PRESETS[strictness];
+  const rec = {
+    enabled: true, invoked: false, model: cfg.decision_model_model || '',
+    outcome: 'skipped', strictness,
+  };
   const fail = (why) => {
     rec.outcome = 'fail-open';
     rec.error = why;
@@ -2139,8 +2232,11 @@ async function decisionModelJudge(payload, judged, env) {
       input,
       project_root: judged.ctx.projectDir || '',
     },
-    questions: modelQuestions(cfg),
+    questions: modelQuestions(),
   };
+  // 当前目录只在能归一为绝对路径时发送；可写根仅在非空时发送
+  if (judged.ctx.cwd) body.state.cwd = judged.ctx.cwd;
+  if (judged.ctx.roots && judged.ctx.roots.length) body.state.allowed_roots = judged.ctx.roots.slice();
   if (cfg.decision_model_model) body.model = cfg.decision_model_model;
 
   rec.invoked = true;
@@ -2155,15 +2251,22 @@ async function decisionModelJudge(payload, judged, env) {
   if (resp.status < 200 || resp.status >= 300) return fail('HTTP ' + resp.status);
   let parsed;
   try { parsed = JSON.parse(resp.text); } catch (e) { return fail('响应不是合法 JSON'); }
-  const ans = parseModelAnswer(parsed);
-  if (!ans) return fail('响应缺少 answers.ask');
-  rec.score = ans.score;
-  rec.kind = ans.kind;
-  if (ans.score >= cfg.decision_model_threshold) {
+  const ans = parseModelAnswers(parsed);
+  if (ans.error) return fail(ans.error);
+  rec.scores = Object.assign({}, ans.scores, { q_opaque: ans.opaque });
+  rec.thresholds = thresholds;
+  rec.opaque_missing = ans.opaqueMissing;
+  const decision = decideModelAnswers(ans.scores, ans.opaque, thresholds);
+  rec.kind = decision.kind;
+  rec.margins = decision.margins;
+  rec.crossed = decision.crossed;
+  if (decision.trigger) {
+    const t = decision.trigger;
     rec.outcome = 'ask';
     return {
-      reason: '[' + PLUGIN_ID + ': 决策模型] 建议确认：' + ans.kind +
-        '（分数 ' + ans.score.toFixed(2) + '，阈值 ' + cfg.decision_model_threshold + '）',
+      reason: '[' + PLUGIN_ID + ': 决策模型] 建议确认：' + decision.kind +
+        '（' + t.q + ' ' + t.score.toFixed(2) + ' ≥ ' + t.threshold.toFixed(2) +
+        '；strictness=' + strictness + '）',
       record: rec,
     };
   }
@@ -2346,7 +2449,11 @@ module.exports = {
   decisionModelJudge,
   sanitizeModelInput,
   parseModelEndpoint,
-  parseModelAnswer,
+  parseModelAnswers,
+  decideModelAnswers,
+  modelQuestions,
+  STRICTNESS_PRESETS,
+  DEFAULT_STRICTNESS,
   parseModelHeaders,
   resolveProxy,
   isLocalAddress,

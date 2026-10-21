@@ -214,16 +214,46 @@ t('代理解析：配置覆盖环境、NO_PROXY、本机直连', () => {
   assert.ok(guard.resolveProxy(target, { decision_model_proxy: '' },
     { HTTPS_PROXY: 'https://proxy:1' }).error, 'https 代理应拒绝');
 });
-t('响应解析：noul/probability/score 与 choice/probabilities', () => {
-  assert.deepStrictEqual(guard.parseModelAnswer({ answers: { ask: { noul: 0.8 }, kind: { choice: 'git_history' } } }),
-    { score: 0.8, kind: 'git_history' });
-  assert.deepStrictEqual(guard.parseModelAnswer({ answers: { ask: { probability: 0.3 } } }),
-    { score: 0.3, kind: 'unknown' });
-  assert.deepStrictEqual(guard.parseModelAnswer({ answers: { ask: { score: 0.5 }, kind: { probabilities: { a: 0.2, b: 0.9 } } } }),
-    { score: 0.5, kind: 'b' });
-  assert.strictEqual(guard.parseModelAnswer({ answers: {} }), null);
-  assert.strictEqual(guard.parseModelAnswer({}), null);
-  assert.strictEqual(guard.parseModelAnswer(null), null);
+t('五问解析：完整、兼容 noul/probability/score、q_opaque 可选', () => {
+  const full = guard.parseModelAnswers({ answers: {
+    q_loss: { noul: 0.1 }, q_system: { probability: 0.2 },
+    q_external: { score: 0.3 }, q_exfil: 0.4, q_opaque: { noul: 0.9 },
+  } });
+  assert.deepStrictEqual(full.scores, { q_loss: 0.1, q_system: 0.2, q_external: 0.3, q_exfil: 0.4 });
+  assert.strictEqual(full.opaque, 0.9);
+  assert.strictEqual(full.opaqueMissing, false);
+  const noOpaque = guard.parseModelAnswers({ answers: {
+    q_loss: { noul: 0.1 }, q_system: { noul: 0.2 }, q_external: { noul: 0.3 }, q_exfil: { noul: 0.4 },
+  } });
+  assert.strictEqual(noOpaque.opaque, null);
+  assert.strictEqual(noOpaque.opaqueMissing, true);
+});
+t('五问解析：任一硬维度缺失/非法 → 报具体缺失项；旧 ask/kind 无效', () => {
+  const base = { q_loss: { noul: 0.1 }, q_system: { noul: 0.2 }, q_external: { noul: 0.3 }, q_exfil: { noul: 0.4 } };
+  const missing = Object.assign({}, base);
+  delete missing.q_exfil;
+  assert.strictEqual(guard.parseModelAnswers({ answers: missing }).error, '响应缺少 answers.q_exfil');
+  assert.strictEqual(guard.parseModelAnswers({ answers: Object.assign({}, base, { q_loss: { noul: 'x' } }) }).error,
+    '响应缺少 answers.q_loss');
+  assert.strictEqual(guard.parseModelAnswers({ answers: { ask: { noul: 0.9 }, kind: { choice: 'x' } } }).error,
+    '响应缺少 answers.q_loss');
+  assert.strictEqual(guard.parseModelAnswers({}).error, '响应缺少 answers');
+});
+t('kind 派生：margin 最大、margin 并列按 scope、无跨阈值用 q_opaque', () => {
+  const th = guard.STRICTNESS_PRESETS[1];
+  const scores = (o) => Object.assign({ q_loss: 0, q_system: 0, q_external: 0, q_exfil: 0 }, o);
+  assert.strictEqual(guard.decideModelAnswers(scores({ q_system: 0.98 }), 0, th).kind, 'system_change');
+  // margin 最大：system 0.98-0.75=0.23 > loss 0.95-0.80=0.15
+  assert.strictEqual(guard.decideModelAnswers(scores({ q_system: 0.98, q_loss: 0.95 }), 0, th).kind, 'system_change');
+  // margin 并列：loss 与 system 都是 0.15 → scope 更高的 loss
+  assert.strictEqual(guard.decideModelAnswers(scores({ q_loss: 0.95, q_system: 0.90 }), 0, th).kind, 'irreversible_loss');
+  // 等于阈值也算跨阈值
+  assert.strictEqual(guard.decideModelAnswers(scores({ q_loss: 0.80 }), 0, th).kind, 'irreversible_loss');
+  const quiet = guard.decideModelAnswers(scores({}), 0.92, th);
+  assert.strictEqual(quiet.kind, 'code_execution');
+  assert.strictEqual(quiet.trigger, null);
+  assert.strictEqual(guard.decideModelAnswers(scores({}), 0.69, th).kind, 'routine');
+  assert.strictEqual(guard.decideModelAnswers(scores({}), null, th).kind, 'routine');
 });
 t('发送前脱敏：API key/password/Bearer/私钥块/长密钥', () => {
   const key = 'sk-live-abcdefghijklmnop';
