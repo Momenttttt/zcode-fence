@@ -45,8 +45,7 @@ function answer(scores, opaque) {
   const all = Object.assign({ q_loss: 0.01, q_system: 0.01, q_external: 0.01, q_exfil: 0.01 }, scores || {});
   const answers = {};
   for (const key of QUESTION_KEYS.slice(0, 4)) answers[key] = { type: 'noul', noul: all[key] };
-  if (opaque !== undefined) answers.q_opaque = { type: 'noul', noul: opaque };
-  else answers.q_opaque = { type: 'noul', noul: 0.2 };
+  answers.q_opaque = { type: 'noul', noul: opaque === undefined ? 0.2 : opaque };
   return { answers };
 }
 function defaultAnswer(score, q, opaque) {
@@ -392,7 +391,7 @@ async function runCase(extraCfg, command) {
     assert.ok(lastBody.state.allowed_roots, '项目根存在时仍发送 allowed_roots');
   });
 
-  await t('无项目根时省略 allowed_roots', async () => {
+  await t('无项目根时仍发送非空 allowed_roots（临时/记忆）', async () => {
     behavior = { status: 200, body: JSON.stringify(answer({}, 0.2)), delay: 0 };
     lastBody = null;
     const dir = caseDir();
@@ -404,7 +403,8 @@ async function runCase(extraCfg, command) {
     };
     const r = await runGuard(env, payload);
     assert.strictEqual(r.out.trim(), '');
-    assert.strictEqual(lastBody.state.allowed_roots, undefined);
+    assert.ok(Array.isArray(lastBody.state.allowed_roots), '临时/记忆根非空时应发送');
+    assert.ok(lastBody.state.allowed_roots.length > 0);
     assert.strictEqual(lastBody.state.cwd, undefined);
     assert.strictEqual(lastBody.state.project_root, '');
   });

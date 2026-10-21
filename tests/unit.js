@@ -181,14 +181,15 @@ t('严格度归一：只接受 0/1/2（数字或数字字符串）', () => {
     assert.strictEqual(r.note, null, JSON.stringify(v));
   }
 });
-t('严格度非法/空值回退 1 并留痕（空串不能当 0）', () => {
+t('严格度非法/空值/缺失回退 1 并留痕（空串不能当 0）', () => {
   for (const v of ['', '  ', null, '3', 'abc', 3, -1, 1.5, true, {}]) {
     const r = guard.normalizeStrictness(v);
     assert.strictEqual(r.value, 1, JSON.stringify(v));
     assert.ok(r.note, JSON.stringify(v) + ' 应留痕');
   }
-  assert.strictEqual(guard.normalizeStrictness(undefined).value, 1);
-  assert.strictEqual(guard.normalizeStrictness(undefined).note, null);
+  const missing = guard.normalizeStrictness(undefined);
+  assert.strictEqual(missing.value, 1);
+  assert.ok(/未配置/.test(missing.note), missing.note);
 });
 t('三档阈值与 spec 一致', () => {
   assert.deepStrictEqual(guard.STRICTNESS_PRESETS, {
@@ -243,7 +244,7 @@ t('代理解析：配置覆盖环境、NO_PROXY、本机直连', () => {
 t('五问解析：完整、兼容 noul/probability/score、q_opaque 可选', () => {
   const full = guard.parseModelAnswers({ answers: {
     q_loss: { noul: 0.1 }, q_system: { probability: 0.2 },
-    q_external: { score: 0.3 }, q_exfil: 0.4, q_opaque: { noul: 0.9 },
+    q_external: { score: 0.3 }, q_exfil: { noul: 0.4 }, q_opaque: { noul: 0.9 },
   } });
   assert.deepStrictEqual(full.scores, { q_loss: 0.1, q_system: 0.2, q_external: 0.3, q_exfil: 0.4 });
   assert.strictEqual(full.opaque, 0.9);
@@ -260,6 +261,14 @@ t('五问解析：任一硬维度缺失/非法 → 报具体缺失项；旧 ask/
   delete missing.q_exfil;
   assert.strictEqual(guard.parseModelAnswers({ answers: missing }).error, '响应缺少 answers.q_exfil');
   assert.strictEqual(guard.parseModelAnswers({ answers: Object.assign({}, base, { q_loss: { noul: 'x' } }) }).error,
+    '响应缺少 answers.q_loss');
+  // 非数字类型不做强制转换（true/''/[] 都是非法协议形态）
+  for (const bad of [true, '', [], '0.9', null]) {
+    assert.strictEqual(guard.parseModelAnswers({ answers: Object.assign({}, base, { q_loss: { noul: bad } }) }).error,
+      '响应缺少 answers.q_loss', JSON.stringify(bad));
+  }
+  // 裸数字不是协议要求的字段形态
+  assert.strictEqual(guard.parseModelAnswers({ answers: Object.assign({}, base, { q_loss: 0.9 }) }).error,
     '响应缺少 answers.q_loss');
   assert.strictEqual(guard.parseModelAnswers({ answers: { ask: { noul: 0.9 }, kind: { choice: 'x' } } }).error,
     '响应缺少 answers.q_loss');
@@ -307,6 +316,16 @@ t('问题构造：恰好五问；仅带策略时追加短引用', () => {
   for (const key of Object.keys(withPolicy)) {
     assert.ok(withPolicy[key].instructions.endsWith('Apply state.policy if present.'), key);
   }
+});
+t('维度/问题/阈值键集合一致（防止新增维度时漏改）', () => {
+  const hardKeys = guard.MODEL_HARD_DIMENSIONS.map((d) => d.key).sort();
+  const questionKeys = Object.keys(guard.modelQuestions(false)).filter((k) => k !== 'q_opaque').sort();
+  assert.deepStrictEqual(questionKeys, hardKeys);
+  for (const level of Object.keys(guard.STRICTNESS_PRESETS)) {
+    assert.deepStrictEqual(Object.keys(guard.STRICTNESS_PRESETS[level]).sort(), hardKeys, level);
+  }
+  const scopes = guard.MODEL_HARD_DIMENSIONS.map((d) => d.scope).sort();
+  assert.deepStrictEqual(scopes, [1, 2, 3, 4]);
 });
 t('发送前脱敏：API key/password/Bearer/私钥块/长密钥', () => {
   const key = 'sk-live-abcdefghijklmnop';

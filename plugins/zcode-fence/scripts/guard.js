@@ -44,6 +44,8 @@ function splitList(s) {
   return String(s == null ? '' : s).split(';').map((t) => t.trim()).filter(Boolean);
 }
 
+const DEFAULT_STRICTNESS = 1;   // 0=宽松、1=标准、2=严格
+
 const DEFAULT_CONFIG = {
   enable_danger_gate: true,
   enable_fence: true,
@@ -56,7 +58,7 @@ const DEFAULT_CONFIG = {
   decision_model_endpoint: '',
   decision_model_model: '',
   decision_model_api_key: '',
-  decision_model_strictness: 1,
+  decision_model_strictness: DEFAULT_STRICTNESS,
   decision_model_timeout_ms: 3500,
   decision_model_headers: '',
   decision_model_proxy: '',
@@ -69,19 +71,23 @@ function clampNumber(v, dflt, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
-// 严格度：只接受 0/1/2（数字或对应数字字符串）；空值/非法值回退标准档并留痕
+// 严格度：只接受 0/1/2（数字或对应数字字符串）；缺失/空值/非法值回退标准档并留痕
 function normalizeStrictness(v) {
-  if (v === undefined) return { value: DEFAULT_STRICTNESS, note: null };
-  if (v === null) return { value: DEFAULT_STRICTNESS, note: 'decision_model_strictness 为空，回退 1（标准）' };
+  const fallback = Number(DEFAULT_STRICTNESS);
+  const standard = fallback + '（标准）';
+  if (v === undefined) {
+    return { value: fallback, note: 'decision_model_strictness 未配置，使用默认 ' + standard };
+  }
+  if (v === null) return { value: fallback, note: 'decision_model_strictness 为空，回退 ' + standard };
   if (typeof v === 'number' && (v === 0 || v === 1 || v === 2)) return { value: v, note: null };
   if (typeof v === 'string') {
     const t = v.trim();
     if (/^[012]$/.test(t)) return { value: Number(t), note: null };
-    if (!t) return { value: DEFAULT_STRICTNESS, note: 'decision_model_strictness 为空，回退 1（标准）' };
+    if (!t) return { value: fallback, note: 'decision_model_strictness 为空，回退 ' + standard };
   }
   return {
-    value: DEFAULT_STRICTNESS,
-    note: 'decision_model_strictness 非法（' + String(v) + '），回退 1（标准）',
+    value: fallback,
+    note: 'decision_model_strictness 非法（' + String(v) + '），回退 ' + standard,
   };
 }
 
@@ -1753,6 +1759,26 @@ function saveSessionRoot(env, sessionId, rootNorm) {
   } catch (e) { /* 状态写失败不影响判定 */ }
 }
 
+// 可写根：项目根 + 当前平台真实临时目录 + ZCode 项目记忆目录 + 额外可写根。
+// 项目根缺失时仍返回临时/记忆/额外根（决策模型可见），围栏由调用方降级。
+function collectRoots(projectDir, cfg, env, platform, npFile) {
+  const roots = projectDir ? [projectDir] : [];
+  const temps = platform === 'win32'
+    ? [env.TEMP, env.TMP, os.tmpdir()]     // Windows 读 TEMP/TMP（真实临时目录）
+    : [env.TMPDIR, '/tmp', os.tmpdir()];   // Unix 用 TMPDIR，/tmp 保留
+  // ZCode 项目记忆目录（~/.zcode/cli/memories）：宿主记忆功能高频写入，默认放行，
+  // 避免完全访问模式下反复弹确认。用正斜杠 join，兼容 HOME 为 MSYS 风格（/c/Users/x）的环境。
+  const memRoot = [homeOf(env), '.zcode', 'cli', 'memories'].join('/');
+  for (const t of temps.concat([memRoot], splitList(cfg.extra_writable_roots))) {
+    if (!t) continue;
+    const i = normalizePath(t, npFile);
+    if (i.kind !== 'drive' && i.kind !== 'unix' && i.kind !== 'unc') continue;
+    const r = realPathBest(i.norm, platform) || i.norm;
+    if (!roots.some((x) => isUnder(r, x, platform) || isUnder(x, r, platform))) roots.push(r);
+  }
+  return roots;
+}
+
 function buildContext(env, opts) {
   const platform = process.platform;
   const loaded = loadConfig(env);
@@ -1788,26 +1814,11 @@ function buildContext(env, opts) {
     platform, env, projectDir, homeNorm, npFile, npBash, roots: null,
   };
 
-  if (projectDir) {
-    // 可写根 = 项目根 + 当前平台真实临时目录 + ZCode 项目记忆目录 + 用户配置的额外可写根。
-    // 相对写目标按命令内 cwd 解析后同样与这些根比较（cd 进临时目录后的相对写仍放行）。
-    const roots = [projectDir];
-    const temps = platform === 'win32'
-      ? [env.TEMP, env.TMP, os.tmpdir()]     // Windows 读 TEMP/TMP（真实临时目录）
-      : [env.TMPDIR, '/tmp', os.tmpdir()];   // Unix 用 TMPDIR，/tmp 保留
-    // ZCode 项目记忆目录（~/.zcode/cli/memories）：宿主记忆功能高频写入，默认放行，
-    // 避免完全访问模式下反复弹确认。用正斜杠 join，兼容 HOME 为 MSYS 风格（/c/Users/x）的环境。
-    const memRoot = [homeOf(env), '.zcode', 'cli', 'memories'].join('/');
-    const extras = splitList(ctx.cfg.extra_writable_roots);
-    for (const t of temps.concat([memRoot], extras)) {
-      if (!t) continue;
-      const i = normalizePath(t, npFile);
-      if (i.kind !== 'drive' && i.kind !== 'unix' && i.kind !== 'unc') continue;
-      const r = realPathBest(i.norm, platform) || i.norm;
-      if (!roots.some((x) => isUnder(r, x, platform) || isUnder(x, r, platform))) roots.push(r);
-    }
-    ctx.roots = roots;
-  }
+  // 可写根 = 项目根 + 当前平台真实临时目录 + ZCode 项目记忆目录 + 用户配置的额外可写根。
+  // 项目根缺失时返回的列表仍含临时/记忆/额外根（供决策模型展示）；围栏由 ctx.roots=null 降级。
+  const roots = collectRoots(projectDir, ctx.cfg, env, platform, npFile);
+  ctx.modelRoots = roots;
+  ctx.roots = projectDir ? roots : null;
   return ctx;
 }
 
@@ -1983,7 +1994,6 @@ const STRICTNESS_PRESETS = {
   1: { q_loss: 0.80, q_system: 0.75, q_external: 0.85, q_exfil: 0.85 },
   2: { q_loss: 0.85, q_system: 0.80, q_external: 0.90, q_exfil: 0.90 },
 };
-const DEFAULT_STRICTNESS = 1;
 
 function isLocalAddress(host) {
   let h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
@@ -2069,16 +2079,12 @@ function parseModelHeaders(s) {
   return out;
 }
 
-// 单个 noul 答案的分数：兼容 noul / probability / score，非有限数值视为缺失
+// 单个 noul 答案的分数：兼容 noul / probability / score 字段；非数字或非有限值视为缺失
 function noulScore(answer) {
-  if (answer == null) return null;
-  if (typeof answer === 'number') return isFinite(answer) ? answer : null;
-  if (typeof answer !== 'object' || Array.isArray(answer)) return null;
+  if (!answer || typeof answer !== 'object' || Array.isArray(answer)) return null;
   const raw = answer.noul != null ? answer.noul
     : (answer.probability != null ? answer.probability : answer.score);
-  if (raw == null) return null;
-  const n = Number(raw);
-  return isFinite(n) ? n : null;
+  return (typeof raw === 'number' && isFinite(raw)) ? raw : null;
 }
 
 // 解析 B5 五问答案：四个硬维度必须齐全；q_opaque 可选（缺失不影响裁决）
@@ -2279,7 +2285,9 @@ async function decisionModelJudge(payload, judged, env) {
   if (policy.text) body.state.policy = policy.text;
   // 当前目录只在能归一为绝对路径时发送；可写根仅在非空时发送
   if (judged.ctx.cwd) body.state.cwd = judged.ctx.cwd;
-  if (judged.ctx.roots && judged.ctx.roots.length) body.state.allowed_roots = judged.ctx.roots.slice();
+  if (judged.ctx.modelRoots && judged.ctx.modelRoots.length) {
+    body.state.allowed_roots = judged.ctx.modelRoots.slice();
+  }
   if (cfg.decision_model_model) body.model = cfg.decision_model_model;
 
   rec.invoked = true;
@@ -2497,6 +2505,7 @@ module.exports = {
   decideModelAnswers,
   modelQuestions,
   modelPolicy,
+  MODEL_HARD_DIMENSIONS,
   STRICTNESS_PRESETS,
   DEFAULT_STRICTNESS,
   parseModelHeaders,
